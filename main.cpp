@@ -6,7 +6,7 @@
 
 int main(int argc, char *argv[])
 {
-
+//以此为基础提交后续
     qputenv("QT_IM_MODULE", QByteArray("qtvirtualkeyboard"));
     QApplication a(argc, argv);
     /* 指定文件 */
