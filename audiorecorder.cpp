@@ -7,8 +7,23 @@
 #include <QApplication>
 #include <QProcess>
 #include "newwindow.h"  // 包含新窗口类的头文件
+#include "signalquality.h"
 #include <QtMath>  // 包含Qt数学函数库，提供qSqrt等函数
 #include <QFile>
+#include <QDateTime>
+#include <QDesktopServices>
+#include <QDir>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QFrame>
+#include <QGridLayout>
+#include <QHBoxLayout>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QSlider>
+#include <QTextStream>
+#include <QThread>
+#include <QUrl>
 
 #include "gps.h"
 AudioRecorder::AudioRecorder(QWidget *parent, QString firmware)
@@ -20,7 +35,7 @@ AudioRecorder::AudioRecorder(QWidget *parent, QString firmware)
       isRecording(false),
       recordTimer(nullptr),
       a(0.5),
-      m_maxLeftChannelLevel(0),
+      m_maxSignalLevel(0),
       firmware(firmware),
       serialPort(new QSerialPort(this)),
       // 初始化新增的计数器
@@ -32,59 +47,20 @@ AudioRecorder::AudioRecorder(QWidget *parent, QString firmware)
     /* 设置音频 */
     setupAudio();
 
-    system("echo 255 > /sys/devices/platform/soc/40015000.i2c/i2c-2/2-002c/rdac1");  // 执行第一个命令
-    system("echo 255 > /sys/devices/platform/soc/40015000.i2c/i2c-2/2-002c/rdac0");  // 执行第一个命令
+    // 程序进入后即处于听音模式；远程连接只负责核间控制命令。
+    QTimer::singleShot(0, this, &AudioRecorder::recorderBtClicked);
 
-    system("amixer -c 0 cset numid=20 0");  // 执行第一个命令
-    system("amixer -c 0 cset numid=21 0");  // 执行第一个命令
-
-    /* 连接按钮 */
-    connect(recorderBt, &QPushButton::clicked, this, &AudioRecorder::recorderBtClicked);
-
-    // 连接新按钮的信号与槽
-    connect(commandBt1, &QPushButton::clicked, this, &AudioRecorder::commandBt1Clicked);
-    connect(commandBt2, &QPushButton::clicked, this, &AudioRecorder::commandBt2Clicked);
-    connect(commandBt3, &QPushButton::clicked, this, &AudioRecorder::commandBt3Clicked);
-    connect(commandBt6, &QPushButton::clicked, this, &AudioRecorder::commandBt6Clicked);
-
-
-
-
-    connect(executeBt, &QPushButton::clicked, this, &AudioRecorder::executeBtClicked);  // 这一行是新增的
-    // 连接新按钮的信号与槽（示例）
-    connect(newBtn1, &QPushButton::clicked, this, &AudioRecorder::newBtn1Clicked);
-    connect(newBtn2, &QPushButton::clicked, this, &AudioRecorder::newBtn2Clicked);
-    connect(newBtn3, &QPushButton::clicked, this, &AudioRecorder::newBtn3Clicked);
-    connect(newBtn4, &QPushButton::clicked, this, &AudioRecorder::newBtn4Clicked);
-
-    // 连接滑动条信号（示例：更新h值显示）
-    connect(hSlider, &QSlider::valueChanged, this, &AudioRecorder::updateHValueFromSlider);
-
-    this->firmware = firmware;
+#ifdef Q_OS_LINUX
+    system("echo 255 > /sys/devices/platform/soc/40015000.i2c/i2c-2/2-002c/rdac1");
+    system("echo 255 > /sys/devices/platform/soc/40015000.i2c/i2c-2/2-002c/rdac0");
+    system("amixer -c 0 cset numid=20 0");
+    system("amixer -c 0 cset numid=21 0");
+#endif
 
     qDebug() << "固件名字" << firmware << endl;
 
-
-    serialPort = new QSerialPort(this);
-
-
-    connect(serialPort, SIGNAL(readyRead()),this, SLOT(serialPortReadyRead()));
-
-    // 连接信号槽
-    connect(serialPort, &QSerialPort::readyRead, this, &AudioRecorder::serialPortReadyRead);
-
-
-    // 在AudioRecorder的构造函数中添加
-    connect(this, &AudioRecorder::leftChannelLevelUpdated,
-            this, &AudioRecorder::onLevelUpdated);  // 先连接到自身槽函数
-
-}
-
-// 新增槽函数，转发信号到已创建的窗口
-void AudioRecorder::onLevelUpdated(qreal level) {
-    if (m_newWindow) {  // 若窗口已创建，直接转发
-        m_newWindow->setLeftChannelLevel(level);
-    }
+    connect(serialPort, &QSerialPort::readyRead,
+            this, &AudioRecorder::serialPortReadyRead);
 }
 
 
@@ -209,7 +185,18 @@ bool AudioRecorder::restorePcmFromTxtToWav(const QString& txtFilePath, const QSt
 
 void AudioRecorder::onRestorePcmBtnClicked()
 {
+    const QString inputPath = QFileDialog::getOpenFileName(
+        this, "选择 PCM 文本文件", QCoreApplication::applicationDirPath(),
+        "PCM 文本 (*.txt);;所有文件 (*.*)");
+    if (inputPath.isEmpty())
+        return;
 
+    const QFileInfo inputInfo(inputPath);
+    const QString suggestedPath = inputInfo.dir().filePath(inputInfo.completeBaseName() + ".wav");
+    const QString outputPath = QFileDialog::getSaveFileName(
+        this, "保存 WAV 文件", suggestedPath, "WAV 音频 (*.wav)");
+    if (!outputPath.isEmpty())
+        restorePcmFromTxtToWav(inputPath, outputPath);
 }
 
 
@@ -415,14 +402,28 @@ void AudioRecorder::writeRawToWav(const QByteArray &rawData)
 
 
 void AudioRecorder::onFilteredIntensityReceived(double intensity) {
-    qDebug() << "AudioRecorder转发滤波强度到BarChart：" << intensity;  // 新增调试打印
+    const int sampleWindow = 16;
+    m_recentFilteredIntensities.append(intensity);
+    if (m_recentFilteredIntensities.size() > sampleWindow)
+        m_recentFilteredIntensities.removeFirst();
+
+    const RobustSignalResult stable = robustSignalLevel(
+        m_recentFilteredIntensities.constData(), m_recentFilteredIntensities.size());
+    if (!stable.valid) {
+        globalMaxLabel->setText(QString("稳定强度：采集中 %1/%2")
+                                .arg(m_recentFilteredIntensities.size())
+                                .arg(sampleWindow));
+        return;
+    }
+
+    m_globalMaxFilteredIntensity = stable.level;
+    globalMaxLabel->setText(QString("稳定强度：%1% · %2周期")
+                            .arg(stable.level, 0, 'f', 1)
+                            .arg(stable.burstCount));
     if (m_barChartWindow) {
-        m_barChartWindow->setGlobalMaxFilteredData(intensity);
-    } else {
-        qDebug() << "BarChartMainWindow尚未创建，无法转发";  // 新增调试打印
+        m_barChartWindow->setGlobalMaxFilteredData(m_globalMaxFilteredIntensity);
     }
 }
-
 
 void AudioRecorder::onPlayRawBtnClicked()
 {
@@ -692,14 +693,6 @@ void AudioRecorder::onPlayFilteredBtnClicked()
 //    QWidget *infoWidget = new QWidget();
 //    QVBoxLayout *infoVBox = new QVBoxLayout(infoWidget);
 //    infoVBox->setSpacing(5);
-
-//    leftChannelLevelLabel = new QLabel("L: 0%", this);
-//    leftChannelLevelLabel->setStyleSheet("QLabel { font-size: 20px; }");
-//    infoVBox->addWidget(leftChannelLevelLabel, 0, Qt::AlignLeft);
-
-//    maxLeftChannelLevelLabel = new QLabel("Max: 0%", this);
-//    maxLeftChannelLevelLabel->setStyleSheet("QLabel { font-size: 20px; color: #666; }");
-//    infoVBox->addWidget(maxLeftChannelLevelLabel, 0, Qt::AlignLeft);
 
 //    modeLabel = new QLabel("滤Max:", this);
 //    modeLabel->setStyleSheet("QLabel { font-size: 20px; color: #2c3e50; }");
@@ -1100,608 +1093,443 @@ void AudioRecorder::onPlayFilteredBtnClicked()
 
 void AudioRecorder::layoutInit()
 {
-    this->setGeometry(100, 100, 800, 480);
-    this->setWindowTitle("音频调节工具");
+    setFixedSize(800, 480);
+    setWindowTitle("GPPL5000 智能声源定位仪");
 
     mainWidget = new QWidget(this);
+    mainWidget->setObjectName("instrumentPanel");
     setCentralWidget(mainWidget);
 
-    QVBoxLayout *vBoxLayout = new QVBoxLayout(mainWidget);
-    vBoxLayout->setContentsMargins(5, 5, 5, 5);
-    vBoxLayout->setSpacing(8);
+    auto makeButton = [this](const QString &text, const char *role) {
+        QPushButton *button = new QPushButton(text, mainWidget);
+        button->setProperty("role", role);
+        button->setCursor(Qt::PointingHandCursor);
+        return button;
+    };
 
-    // ========== 顶部控制行（topControlWidget）的创建逻辑保持不变 ==========
-    QWidget *topControlWidget = new QWidget();
-    QHBoxLayout *topHBox = new QHBoxLayout(topControlWidget);
-    topHBox->setSpacing(5);
+    QVBoxLayout *rootLayout = new QVBoxLayout(mainWidget);
+    rootLayout->setContentsMargins(10, 8, 10, 8);
+    rootLayout->setSpacing(8);
 
-    QWidget *leftControlWidget = new QWidget();
-    QHBoxLayout *leftHBox = new QHBoxLayout(leftControlWidget);
-    leftHBox->setSpacing(5);
+    QFrame *statusBar = new QFrame(mainWidget);
+    statusBar->setObjectName("deviceStatusBar");
+    QHBoxLayout *statusLayout = new QHBoxLayout(statusBar);
+    statusLayout->setContentsMargins(12, 5, 12, 5);
+    statusLayout->setSpacing(12);
 
-    recorderBt = new QPushButton("启动", this);
-    recorderBt->setFixedSize(90, 32);
-    leftHBox->addWidget(recorderBt);
+    QLabel *brandLabel = new QLabel("GPPL5000", statusBar);
+    brandLabel->setObjectName("brandLabel");
+    QLabel *titleLabel = new QLabel("智能声源定位仪", statusBar);
+    titleLabel->setObjectName("screenTitle");
+    QLabel *firmwareLabel = new QLabel(
+        firmware.isEmpty() ? "桌面预览模式" : QString("固件：%1").arg(firmware), statusBar);
+    firmwareLabel->setObjectName("statusPill");
+    QLabel *deviceLabel = new QLabel("● 设备待连接", statusBar);
+    deviceLabel->setObjectName("deviceState");
+    QLabel *batteryLabel = new QLabel("▰ 100%", statusBar);
+    batteryLabel->setObjectName("statusPill");
 
-    executeBt = new QPushButton("返回", this);
-    executeBt->setFixedSize(90, 32);
-    leftHBox->addWidget(executeBt);
+    statusLayout->addWidget(brandLabel);
+    statusLayout->addWidget(titleLabel);
+    statusLayout->addStretch();
+    statusLayout->addWidget(firmwareLabel);
+    statusLayout->addWidget(deviceLabel);
+    statusLayout->addWidget(batteryLabel);
+    rootLayout->addWidget(statusBar);
 
-    topHBox->addWidget(leftControlWidget);
+    QHBoxLayout *bodyLayout = new QHBoxLayout();
+    bodyLayout->setSpacing(8);
 
-    QWidget *aControlWidget = new QWidget();
-    QHBoxLayout *aControlLayout = new QHBoxLayout(aControlWidget);
-    aControlLayout->setSpacing(2);
+    QFrame *leftRail = new QFrame(mainWidget);
+    leftRail->setObjectName("toolRail");
+    leftRail->setFixedWidth(112);
+    QVBoxLayout *leftLayout = new QVBoxLayout(leftRail);
+    leftLayout->setContentsMargins(6, 8, 6, 8);
+    leftLayout->setSpacing(7);
 
-    // ========== 重点优化：valueControlWidget 布局（保持不变） ==========
-    QWidget *valueControlWidget = new QWidget();
-    QHBoxLayout *valueHBox = new QHBoxLayout(valueControlWidget);
-    valueHBox->setContentsMargins(10, 0, 10, 0);
-    valueHBox->setSpacing(8);
-    valueHBox->setAlignment(Qt::AlignCenter);
+    recorderBt = makeButton("▶ 开始听音", "primary");
+    commandBt1 = makeButton("▥ 频谱分析", "tool");
+    commandBt2 = makeButton("↺ 重置测点", "tool");
+    newBtn1 = makeButton("⇄ 远程连接", "tool");
+    newLeftBtn = makeButton("采样记录", "secondary");
+    newBtn2 = makeButton("获取数据", "secondary");
+    newBtn4 = makeButton("清空日志", "danger");
+    executeBt = makeButton("退出系统", "danger");
+    recorderBt->setMinimumHeight(42);
+    commandBt1->setMinimumHeight(38);
+    commandBt2->setMinimumHeight(38);
+    newBtn1->setMinimumHeight(38);
+    commandBt1->setEnabled(false);
+    leftLayout->addWidget(recorderBt);
+    leftLayout->addWidget(commandBt1);
+    leftLayout->addWidget(commandBt2);
+    leftLayout->addWidget(newBtn1);
+    leftLayout->addWidget(newLeftBtn);
+    leftLayout->addWidget(newBtn2);
+    leftLayout->addWidget(newBtn4);
+    leftLayout->addWidget(executeBt);
+    leftLayout->addStretch();
 
-    valueDisplayLabel = new QLabel("255", this);
-    valueDisplayLabel->setFixedSize(50, 35);
-    valueDisplayLabel->setStyleSheet(R"(
-        QLabel {
-            background: white;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            text-align: center;
-            font-size: 14px;
-            font-weight: 500;
-        }
-    )");
+    QFrame *monitorCard = new QFrame(mainWidget);
+    monitorCard->setObjectName("monitorCard");
+    QVBoxLayout *monitorLayout = new QVBoxLayout(monitorCard);
+    monitorLayout->setContentsMargins(12, 9, 12, 9);
+    monitorLayout->setSpacing(7);
+
+    QHBoxLayout *monitorHeader = new QHBoxLayout();
+    QLabel *monitorTitle = new QLabel("硬件滤波原始信号频谱", monitorCard);
+    monitorTitle->setObjectName("panelTitle");
+    modeLabel = new QLabel("当前模式：听音模式", monitorCard);
+    modeLabel->setObjectName("modeLabel");
+    countLabel = new QLabel("工作时间 0 s", monitorCard);
+    countLabel->setObjectName("elapsedLabel");
+    monitorHeader->addWidget(monitorTitle);
+    monitorHeader->addStretch();
+    monitorHeader->addWidget(modeLabel);
+    monitorHeader->addWidget(countLabel);
+    monitorLayout->addLayout(monitorHeader);
+
+    QHBoxLayout *levelLayout = new QHBoxLayout();
+    QLabel *signalLabel = new QLabel("信号", monitorCard);
+    signalLabel->setObjectName("channelMark");
+    progressBar[0] = new QProgressBar(monitorCard);
+    progressBar[0]->setRange(0, 100);
+    progressBar[0]->setValue(0);
+    progressBar[0]->setTextVisible(false);
+    progressBar[0]->setFixedHeight(16);
+    progressBar[1] = nullptr;
+    levelLayout->addWidget(signalLabel);
+    levelLayout->addWidget(progressBar[0], 1);
+    monitorLayout->addLayout(levelLayout);
+
+    QHBoxLayout *metricLayout = new QHBoxLayout();
+    signalLevelLabel = new QLabel("实时强度：0%", monitorCard);
+    maxSignalLevelLabel = new QLabel("原始峰值：0%", monitorCard);
+    globalMaxLabel = new QLabel("稳定强度：采集中", monitorCard);
+    signalLevelLabel->setObjectName("metricLabel");
+    maxSignalLevelLabel->setObjectName("metricLabel");
+    globalMaxLabel->setObjectName("metricHighlight");
+    metricLayout->addWidget(signalLevelLabel);
+    metricLayout->addWidget(maxSignalLevelLabel);
+    metricLayout->addStretch();
+    metricLayout->addWidget(globalMaxLabel);
+    monitorLayout->addLayout(metricLayout);
+
+    m_liveSpectrumPlot = new QCustomPlot(monitorCard);
+    m_liveSpectrumPlot->setObjectName("liveSpectrumPlot");
+    m_liveSpectrumPlot->setMinimumHeight(220);
+    m_liveSpectrumPlot->setBackground(QBrush(QColor("#010503")));
+    m_liveSpectrumPlot->addGraph();
+    m_liveSpectrumPlot->graph(0)->setPen(QPen(QColor("#55f28d"), 1.5));
+    m_liveSpectrumPlot->xAxis->setLabel("频率 (Hz)");
+    m_liveSpectrumPlot->yAxis->setLabel("幅值");
+    m_liveSpectrumPlot->xAxis->setRange(100, 1000);
+    m_liveSpectrumPlot->yAxis->setRange(0, 1);
+    for (QCPAxis *axis : {m_liveSpectrumPlot->xAxis, m_liveSpectrumPlot->yAxis}) {
+        axis->setBasePen(QPen(QColor("#4cbf78")));
+        axis->setTickPen(QPen(QColor("#4cbf78")));
+        axis->setTickLabelColor(QColor("#aee8bd"));
+        axis->setLabelColor(QColor("#d9f5df"));
+        axis->grid()->setPen(QPen(QColor("#173c28"), 1, Qt::DotLine));
+    }
+    monitorLayout->addWidget(m_liveSpectrumPlot, 1);
+
+    testBrowser = new QTextBrowser(monitorCard);
+    testBrowser->setObjectName("eventLog");
+    testBrowser->setOpenExternalLinks(false);
+    testBrowser->setText("系统就绪，正在进入听音模式。");
+    testBrowser->setFixedHeight(30);
+    monitorLayout->addWidget(testBrowser);
+
+    QFrame *rightRail = new QFrame(mainWidget);
+    rightRail->setObjectName("toolRail");
+    rightRail->setFixedWidth(126);
+    QVBoxLayout *rightLayout = new QVBoxLayout(rightRail);
+    rightLayout->setContentsMargins(6, 7, 6, 7);
+    rightLayout->setSpacing(5);
+
+    QPushButton *barChartBtn = makeButton("▥ 七点定位", "secondary");
+    QPushButton *gpsBtn = makeButton("⌖ GPS 记录", "secondary");
+    m_saveRawBtn = makeButton("● 保存原始音频", "tool");
+    QPushButton *playRawBtn = makeButton("▶ 播放原始音频", "tool");
+    m_saveFilteredBtn = makeButton("● 保存滤波音频", "tool");
+    QPushButton *playFilteredBtn = makeButton("▶ 播放滤波音频", "tool");
+    m_restorePcmBtn = makeButton("↥ PCM 转 WAV", "tool");
+    QPushButton *filesBtn = makeButton("▤ 文件管理", "tool");
+    QPushButton *saveLogBtn = makeButton("▣ 保存日志", "tool");
+
+    rightLayout->addWidget(barChartBtn);
+    rightLayout->addWidget(gpsBtn);
+    rightLayout->addWidget(m_saveRawBtn);
+    rightLayout->addWidget(playRawBtn);
+    rightLayout->addWidget(m_saveFilteredBtn);
+    rightLayout->addWidget(playFilteredBtn);
+    rightLayout->addWidget(m_restorePcmBtn);
+    rightLayout->addWidget(filesBtn);
+    rightLayout->addWidget(saveLogBtn);
+    rightLayout->addStretch();
+
+    bodyLayout->addWidget(leftRail);
+    bodyLayout->addWidget(monitorCard, 1);
+    bodyLayout->addWidget(rightRail);
+    rootLayout->addLayout(bodyLayout, 1);
+
+    QFrame *controlBar = new QFrame(mainWidget);
+    controlBar->setObjectName("controlBar");
+    QVBoxLayout *controlStack = new QVBoxLayout(controlBar);
+    controlStack->setContentsMargins(8, 5, 8, 5);
+    controlStack->setSpacing(4);
+    QHBoxLayout *controlLayout = new QHBoxLayout();
+    controlLayout->setSpacing(5);
+
+    QLabel *gainLabel = new QLabel("增益", controlBar);
+    gainLabel->setObjectName("controlLabel");
+    decreaseValueBtn = makeButton("−", "step");
+    valueDisplayLabel = new QLabel("255", controlBar);
+    valueDisplayLabel->setObjectName("valueDisplay");
     valueDisplayLabel->setAlignment(Qt::AlignCenter);
-    valueHBox->addWidget(valueDisplayLabel);
-
-    m_valueLineEdit = new QLineEdit(this);
-    m_valueLineEdit->setFixedSize(120, 35);
-    m_valueLineEdit->setStyleSheet(R"(
-        QLineEdit {
-            background: white;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            padding: 0 8px;
-            text-align: center;
-            font-size: 14px;
-            font-weight: 500;
-            color: #333;
-        }
-        QLineEdit:hover {
-            border-color: #66afe9;
-        }
-        QLineEdit:focus {
-            border-color: #4ecdc4;
-            outline: none;
-        }
-    )");
-    m_valueLineEdit->setPlaceholderText("输入调节值 (0-255)");
+    m_valueLineEdit = new QLineEdit(controlBar);
+    m_valueLineEdit->setObjectName("valueInput");
+    m_valueLineEdit->setPlaceholderText("0–255");
     m_valueLineEdit->setAlignment(Qt::AlignCenter);
-    valueHBox->addWidget(m_valueLineEdit);
+    m_valueLineEdit->setFixedWidth(66);
+    increaseValueBtn = makeButton("+", "step");
 
-    decreaseValueBtn = new QPushButton("-", this);
-    decreaseValueBtn->setFixedSize(40, 35);
-    decreaseValueBtn->setStyleSheet(R"(
-        QPushButton {
-            background-color: #ff6b6b;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            font-size: 16px;
-            font-weight: bold;
-        }
-        QPushButton:hover {
-            background-color: #ff5252;
-        }
-        QPushButton:pressed {
-            background-color: #d32f2f;
-        }
-    )");
-    valueHBox->addWidget(decreaseValueBtn);
-
-    increaseValueBtn = new QPushButton("+", this);
-    increaseValueBtn->setFixedSize(40, 35);
-    increaseValueBtn->setStyleSheet(R"(
-        QPushButton {
-            background-color: #4ecdc4;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            font-size: 16px;
-            font-weight: bold;
-        }
-        QPushButton:hover {
-            background-color: #26a69a;
-        }
-        QPushButton:pressed {
-            background-color: #00897b;
-        }
-    )");
-    valueHBox->addWidget(increaseValueBtn);
-
-    valueControlWidget->setStyleSheet(R"(
-        QWidget {
-            background-color: #f9f9f9;
-            border: 1px solid #eee;
-            border-radius: 6px;
-            padding: 5px;
-        }
-    )");
-    topHBox->addWidget(valueControlWidget);
-    // ========== valueControlWidget 优化结束 ==========
-
-    // ========== 关键修改：给topControlWidget添加顶部空白间距 ==========
-    // 方式1：通过布局的addSpacing添加固定空白（推荐，可自定义距离，比如30px）
-    vBoxLayout->addSpacing(30); // 顶部添加30px空白，topControlWidget会向下移动
-    // 方式2（可选）：调整topControlWidget自身的上边距
-    // topControlWidget->setContentsMargins(0, 30, 0, 0);
-
-    // 将topControlWidget添加到垂直布局
-    vBoxLayout->addWidget(topControlWidget);
-
-    // ========== 以下代码全部保持不变 ==========
-    QWidget *functionWidget = new QWidget();
-    QGridLayout *functionGrid = new QGridLayout(functionWidget);
-    functionGrid->setHorizontalSpacing(5);
-    functionGrid->setVerticalSpacing(8);
-
-    QString textStyle = "QLabel { font-size: 20px; background: white; border: 1px solid #999; border-radius: 2px; text-align: center; }";
-
-    newBtn1 = new QPushButton("远程", this);
-    newBtn1->setFixedSize(80, 22);
-    functionGrid->addWidget(newBtn1, 2, 0);
-
-    newBtn2 = new QPushButton("获取", this);
-    newBtn2->setFixedSize(80, 22);
-    functionGrid->addWidget(newBtn2, 2, 1);
-
-    newBtn3 = new QPushButton("频率", this);
-    newBtn3->setFixedSize(80, 22);
-    functionGrid->addWidget(newBtn3, 2, 2);
-
-    newBtn4 = new QPushButton("delete", this);
-    newBtn4->setFixedSize(80, 22);
-    functionGrid->addWidget(newBtn4, 2, 3);
-
-    QWidget *volumeControlWidget = new QWidget();
-    QHBoxLayout *volumeHBox = new QHBoxLayout(volumeControlWidget);
-    volumeHBox->setContentsMargins(0, 0, 0, 0);
-    volumeHBox->setSpacing(5);
-
-    volumeDownBtn = new QPushButton("-", this);
-    volumeDownBtn->setFixedSize(80, 60);
-    volumeHBox->addWidget(volumeDownBtn);
-
-    hSlider = new QSlider(Qt::Horizontal, this);
+    QLabel *volumeCaption = new QLabel("监听", controlBar);
+    volumeCaption->setObjectName("controlLabel");
+    volumeDownBtn = makeButton("−", "step");
+    hSlider = new QSlider(Qt::Horizontal, controlBar);
     hSlider->setRange(0, 127);
     hSlider->setValue(64);
-    hSlider->setTickPosition(QSlider::NoTicks);
-    hSlider->setStyleSheet(R"(
-                           QSlider::groove:horizontal { height: 12px; background: #f0f0f0; border-radius: 6px; }
-                           QSlider::handle:horizontal { width: 20px; background: #ff5555; margin: -4px 0; border-radius: 10px; }
-                           )");
-    volumeHBox->addWidget(hSlider);
+    hSlider->setFixedWidth(90);
+    volumeUpBtn = makeButton("+", "step");
 
-    volumeUpBtn = new QPushButton("+", this);
-    volumeUpBtn->setFixedSize(80, 60);
-    volumeHBox->addWidget(volumeUpBtn);
+    QLabel *frequencyCaption = new QLabel("中心频率", controlBar);
+    frequencyCaption->setObjectName("controlLabel");
+    commandBt6 = makeButton("−100", "step");
+    newBtn3 = makeButton("500 Hz", "display");
+    newBtn3->setEnabled(false);
+    commandBt3 = makeButton("+100", "step");
+    commandBt6->setEnabled(false);
+    commandBt3->setEnabled(false);
 
-    functionGrid->addWidget(volumeControlWidget, 3, 0, 1, 4);
+    newBtn2->setEnabled(false);
 
-    testBrowser = new QTextBrowser(this);
-    testBrowser->setStyleSheet(R"(
-                               border: 1px solid #ccc;
-                               border-radius: 4px;
-                               background-color: #f8f8f8;
-                               font-size: 20px;
-                               padding: 8px;
-                               )");
-    testBrowser->setMinimumHeight(80);
-    testBrowser->setMaximumHeight(100);
-    testBrowser->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    testBrowser->setReadOnly(true);
+    controlLayout->addWidget(gainLabel);
+    controlLayout->addWidget(decreaseValueBtn);
+    controlLayout->addWidget(valueDisplayLabel);
+    controlLayout->addWidget(m_valueLineEdit);
+    controlLayout->addWidget(increaseValueBtn);
+    controlLayout->addSpacing(7);
+    controlLayout->addWidget(volumeCaption);
+    controlLayout->addWidget(volumeDownBtn);
+    controlLayout->addWidget(hSlider);
+    controlLayout->addWidget(volumeUpBtn);
+    controlLayout->addSpacing(7);
+    controlLayout->addWidget(frequencyCaption);
+    controlLayout->addWidget(commandBt6);
+    controlLayout->addWidget(newBtn3);
+    controlLayout->addWidget(commandBt3);
+    controlLayout->addStretch();
+    controlStack->addLayout(controlLayout);
 
-    QString defaultText = "当前音量: 64/127\n";
-    testBrowser->setPlainText(defaultText);
+    rootLayout->addWidget(controlBar);
 
-    functionGrid->setRowStretch(4, 1);
-    functionGrid->addWidget(testBrowser, 4, 0, 1, 4);
-
-    vBoxLayout->addWidget(functionWidget);
-
-    QWidget *bottomWidget = new QWidget();
-    QHBoxLayout *bottomHBox = new QHBoxLayout(bottomWidget);
-    bottomHBox->setSpacing(8);
-    bottomHBox->setContentsMargins(0, 0, 0, 0);
-
-    QWidget *infoWidget = new QWidget();
-    QVBoxLayout *infoVBox = new QVBoxLayout(infoWidget);
-    infoVBox->setSpacing(5);
-
-    leftChannelLevelLabel = new QLabel("L: 0%", this);
-    leftChannelLevelLabel->setStyleSheet("QLabel { font-size: 20px; }");
-    infoVBox->addWidget(leftChannelLevelLabel, 0, Qt::AlignLeft);
-
-    maxLeftChannelLevelLabel = new QLabel("Max: 0%", this);
-    maxLeftChannelLevelLabel->setStyleSheet("QLabel { font-size: 20px; color: #666; }");
-    infoVBox->addWidget(maxLeftChannelLevelLabel, 0, Qt::AlignLeft);
-
-    modeLabel = new QLabel("滤Max:", this);
-    modeLabel->setStyleSheet("QLabel { font-size: 20px; color: #2c3e50; }");
-    infoVBox->addWidget(modeLabel, 0, Qt::AlignLeft);
-
-    globalMaxLabel = new QLabel("全局最大滤强: 0%", this);
-    globalMaxLabel->setStyleSheet("QLabel { font-size: 20px; color: #e74c3c; }");
-    infoVBox->addWidget(globalMaxLabel);
-
-    countLabel = new QLabel("0s", this);
-    countLabel->setStyleSheet("QLabel { font-size: 20px; font-weight: bold; }");
-    infoVBox->addWidget(countLabel);
-
-    bottomHBox->addWidget(infoWidget);
-
-    QWidget *commandWidget = new QWidget();
-    QVBoxLayout *commandVBox = new QVBoxLayout(commandWidget);
-    commandVBox->setSpacing(5);
-    commandVBox->setContentsMargins(0, 0, 0, 0);
-
-    QWidget *topCommandWidget = new QWidget();
-    QHBoxLayout *topCommandHBox = new QHBoxLayout(topCommandWidget);
-    topCommandHBox->setSpacing(5);
-
-    newLeftBtn = new QPushButton("保存", this);
-    newLeftBtn->setFixedSize(75, 32);
-    topCommandHBox->addWidget(newLeftBtn);
-    connect(newLeftBtn, &QPushButton::clicked, this, [=]() {
-        m_saveBothChannels = !m_saveBothChannels;
-        if (m_saveBothChannels) {
-            newLeftBtn->setText("保存");
-            qDebug() << "开始同时保存左右声道滤波数据（目标5万帧）";
-            m_leftDataBuffer.clear();
-            m_rightDataBuffer.clear();
-            m_bothDataCount = 0;
-        } else {
-            newLeftBtn->setText("保存");
-            qDebug() << "手动停止双声道数据保存";
-        }
-    });
-
-    m_saveRawBtn = new QPushButton("保原", this);
-    m_saveRawBtn->setFixedSize(50, 32);
-    m_saveRawBtn->setStyleSheet(R"(
-        QPushButton {
-            background-color: #3498db;
-            color: white;
-            border: none;
-            border-radius: 4px;
-        }
-        QPushButton:hover {
-            background-color: #2980b9;
-        }
-    )");
-    topCommandHBox->addWidget(m_saveRawBtn);
-
-    QPushButton *m_playRawBtn = new QPushButton("播原", this);
-    m_playRawBtn->setFixedSize(50, 32);
-    m_playRawBtn->setStyleSheet(R"(
-        QPushButton {
-            background-color: #2980b9;
-            color: white;
-            border: none;
-            border-radius: 4px;
-        }
-        QPushButton:hover {
-            background-color: #1f618d;
-        }
-    )");
-    topCommandHBox->addWidget(m_playRawBtn);
-
-    m_saveFilteredBtn = new QPushButton("保滤", this);
-    m_saveFilteredBtn->setFixedSize(50, 32);
-    m_saveFilteredBtn->setStyleSheet(R"(
-        QPushButton {
-            background-color: #2ecc71;
-            color: white;
-            border: none;
-            border-radius: 4px;
-        }
-        QPushButton:hover {
-            background-color: #27ae60;
-        }
-    )");
-    topCommandHBox->addWidget(m_saveFilteredBtn);
-
-    QPushButton *m_playFilteredBtn = new QPushButton("播滤", this);
-    m_playFilteredBtn->setFixedSize(50, 32);
-    m_playFilteredBtn->setStyleSheet(R"(
-        QPushButton {
-            background-color: #27ae60;
-            color: white;
-            border: none;
-            border-radius: 4px;
-        }
-        QPushButton:hover {
-            background-color: #219653;
-        }
-    )");
-    topCommandHBox->addWidget(m_playFilteredBtn);
-
-    commandVBox->addWidget(topCommandWidget);
-
-    QWidget *bottomCommandWidget = new QWidget();
-    QHBoxLayout *bottomCommandHBox = new QHBoxLayout(bottomCommandWidget);
-    bottomCommandHBox->setSpacing(5);
-
-    m_restorePcmBtn = new QPushButton("GPS", this);
-    m_restorePcmBtn->setFixedSize(75, 32);
-    m_restorePcmBtn->setStyleSheet(R"(
-        QPushButton {
-            background-color: #f39c12;
-            color: white;
-            border: none;
-            border-radius: 4px;
-        }
-        QPushButton:hover {
-            background-color: #e67e22;
-        }
-    )");
-    bottomCommandHBox->addWidget(m_restorePcmBtn);
-
-    connect(m_restorePcmBtn, &QPushButton::clicked, this, [=]() {
-        QString allLogText = testBrowser->toPlainText();
-        if (allLogText.isEmpty()) {
-            testBrowser->append("[日志保存]：日志为空，无需保存！");
-            testBrowser->moveCursor(QTextCursor::End);
-            return;
-        }
-        QString logDirPath = QCoreApplication::applicationDirPath() + "/LogFiles";
-        QDir logDir(logDirPath);
-        if (!logDir.exists()) {
-            if (logDir.mkpath(logDirPath)) {
-                testBrowser->append("[日志保存]：创建日志目录成功：" + logDirPath);
-            } else {
-                testBrowser->append("[日志保存失败]：创建日志目录失败！");
-                testBrowser->moveCursor(QTextCursor::End);
-                return;
-            }
-        }
-        QString timeStamp = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss");
-        QString logFileName = "AudioLog_" + timeStamp + ".txt";
-        QString logFilePath = logDirPath + "/" + logFileName;
-
-        QFile logFile(logFilePath);
-        if (logFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
-            QTextStream out(&logFile);
-            out << "===== 音频工具日志文件 =====\n";
-            out << "生成时间：" << QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss") << "\n";
-            out << "日志总行数：" << allLogText.count("\n") + 1 << "\n";
-            out << "===========================\n\n";
-            out << allLogText;
-            logFile.close();
-
-            testBrowser->append("\n[日志保存成功]：" + logFilePath);
-            testBrowser->append("----------------------------------");
-            testBrowser->moveCursor(QTextCursor::End);
-        } else {
-            testBrowser->append("[日志保存失败]：无法打开文件：" + logFile.errorString());
-            testBrowser->append("----------------------------------");
-            testBrowser->moveCursor(QTextCursor::End);
-        }
-    });
-
-    QPushButton *barChartBtn = new QPushButton("柱状图", this);
-    barChartBtn->setFixedSize(75, 32);
-    barChartBtn->setStyleSheet(R"(
-        QPushButton {
-            background-color: #9b59b6;
-            color: white;
-            border: none;
-            border-radius: 4px;
-        }
-        QPushButton:hover {
-            background-color: #8e44ad;
-        }
-    )");
-    bottomCommandHBox->addWidget(barChartBtn);
-
-    connect(barChartBtn, &QPushButton::clicked, this, [=]() {
-        if (!m_barChartWindow) {
-            m_barChartWindow = new BarChartMainWindow(this);
-            connect(m_barChartWindow, &BarChartMainWindow::destroyed, this, [=]() {
-                this->show();
-                m_barChartWindow = nullptr;
-            });
-            if (m_newWindow) {
-                connect(m_newWindow, &NewWindow::filteredIntensityUpdated,
-                        m_barChartWindow, &BarChartMainWindow::setGlobalMaxFilteredData);
-            }
-        }
-        connect(m_barChartWindow, &BarChartMainWindow::clearGlobalMaxFilteredIntensity,
-                this, [=]() {
-            m_globalMaxFilteredIntensity = 0.0;
-            globalMaxLabel->setText("全局最大滤强: 0%");
-        });
-        m_barChartWindow->show();
-        this->hide();
-    });
-
-    commandBt1 = new QPushButton("泄漏", this);
-    commandBt1->setFixedSize(75, 32);
-    commandBt1->setStyleSheet(R"(
-        QPushButton {
-            background-color: #e74c3c;
-            color: white;
-            border: none;
-            border-radius: 4px;
-        }
-        QPushButton:hover {
-            background-color: #c0392b;
-        }
-    )");
-    bottomCommandHBox->addWidget(commandBt1);
-
-    commandBt2 = new QPushButton("清Max", this);
-    commandBt2->setFixedSize(75, 32);
-    commandBt2->setStyleSheet(R"(
-        QPushButton {
-            background-color: #95a5a6;
-            color: white;
-            border: none;
-            border-radius: 4px;
-        }
-        QPushButton:hover {
-            background-color: #7f8c8d;
-        }
-    )");
-    bottomCommandHBox->addWidget(commandBt2);
-
-    commandBt3 = new QPushButton("频+", this);
-    commandBt3->setFixedSize(55, 32);
-    commandBt3->setStyleSheet(R"(
-        QPushButton {
-            background-color: #1abc9c;
-            color: white;
-            border: none;
-            border-radius: 4px;
-        }
-        QPushButton:hover {
-            background-color: #16a085;
-        }
-    )");
-    bottomCommandHBox->addWidget(commandBt3);
-
-    commandBt6 = new QPushButton("频-", this);
-    commandBt6->setFixedSize(55, 32);
-    commandBt6->setStyleSheet(R"(
-        QPushButton {
-            background-color: #16a085;
-            color: white;
-            border: none;
-            border-radius: 4px;
-        }
-        QPushButton:hover {
-            background-color: #138d75;
-        }
-    )");
-    bottomCommandHBox->addWidget(commandBt6);
-
-    commandVBox->addWidget(bottomCommandWidget);
-
-    bottomHBox->addWidget(commandWidget);
-
-    connect(m_saveRawBtn, &QPushButton::clicked, this, &AudioRecorder::onSaveRawBtnClicked);
-    connect(m_playRawBtn, &QPushButton::clicked, this, &AudioRecorder::onPlayRawBtnClicked);
-    connect(m_saveFilteredBtn, &QPushButton::clicked, this, &AudioRecorder::onSaveFilteredBtnClicked);
-    connect(m_playFilteredBtn, &QPushButton::clicked, this, &AudioRecorder::onPlayFilteredBtnClicked);
     connect(recorderBt, &QPushButton::clicked, this, &AudioRecorder::recorderBtClicked);
     connect(commandBt1, &QPushButton::clicked, this, &AudioRecorder::commandBt1Clicked);
     connect(commandBt2, &QPushButton::clicked, this, &AudioRecorder::commandBt2Clicked);
     connect(commandBt3, &QPushButton::clicked, this, &AudioRecorder::commandBt3Clicked);
     connect(commandBt6, &QPushButton::clicked, this, &AudioRecorder::commandBt6Clicked);
-
-    connect(executeBt, &QPushButton::clicked, this, &AudioRecorder::executeBtClicked);
     connect(newBtn1, &QPushButton::clicked, this, &AudioRecorder::newBtn1Clicked);
     connect(newBtn2, &QPushButton::clicked, this, &AudioRecorder::newBtn2Clicked);
-    connect(newBtn3, &QPushButton::clicked, this, &AudioRecorder::newBtn3Clicked);
     connect(newBtn4, &QPushButton::clicked, this, &AudioRecorder::newBtn4Clicked);
+    connect(executeBt, &QPushButton::clicked, this, &AudioRecorder::executeBtClicked);
     connect(hSlider, &QSlider::valueChanged, this, &AudioRecorder::updateHValueFromSlider);
+    connect(m_saveRawBtn, &QPushButton::clicked, this, &AudioRecorder::onSaveRawBtnClicked);
+    connect(playRawBtn, &QPushButton::clicked, this, &AudioRecorder::onPlayRawBtnClicked);
+    connect(m_saveFilteredBtn, &QPushButton::clicked, this, &AudioRecorder::onSaveFilteredBtnClicked);
+    connect(playFilteredBtn, &QPushButton::clicked, this, &AudioRecorder::onPlayFilteredBtnClicked);
+    connect(m_restorePcmBtn, &QPushButton::clicked, this, &AudioRecorder::onRestorePcmBtnClicked);
 
-    vBoxLayout->addWidget(bottomWidget);
-    vBoxLayout->addStretch(0);
+    connect(barChartBtn, &QPushButton::clicked, this, [this]() {
+        if (!m_barChartWindow) {
+            m_barChartWindow = new BarChartMainWindow(this);
+            m_barChartWindow->setAttribute(Qt::WA_DeleteOnClose);
+            connect(m_barChartWindow, &BarChartMainWindow::destroyed, this, [this]() {
+                m_barChartWindow = nullptr;
+                show();
+            });
+            connect(m_barChartWindow, &BarChartMainWindow::clearGlobalMaxFilteredIntensity,
+                    this, [this]() {
+                m_globalMaxFilteredIntensity = 0.0;
+                m_recentFilteredIntensities.clear();
+                globalMaxLabel->setText("稳定强度：采集中");
+            });
+        }
+        m_barChartWindow->setGlobalMaxFilteredData(m_globalMaxFilteredIntensity);
+        m_barChartWindow->show();
+        m_barChartWindow->raise();
+        hide();
+    });
+
+    connect(gpsBtn, &QPushButton::clicked, this, [this]() {
+        if (!m_gpsWindow) {
+            m_gpsWindow = new gps(this);
+            m_gpsWindow->setAttribute(Qt::WA_DeleteOnClose);
+            connect(this, &AudioRecorder::gpsDataSent,
+                    m_gpsWindow, &gps::onGpsDataReceived);
+            connect(m_gpsWindow, &QObject::destroyed, this, [this]() {
+                m_gpsWindow = nullptr;
+                show();
+            });
+        }
+        m_gpsWindow->show();
+        m_gpsWindow->raise();
+        if (!qFuzzyIsNull(m_latitude) || !qFuzzyIsNull(m_longitude)) {
+            emit gpsDataSent(m_latitude, m_longitude);
+        }
+        hide();
+    });
+
+    connect(filesBtn, &QPushButton::clicked, this, [this]() {
+        const QString dataPath = QDir(QCoreApplication::applicationDirPath()).absolutePath();
+        if (!QDesktopServices::openUrl(QUrl::fromLocalFile(dataPath))) {
+            testBrowser->append("无法打开文件目录：" + dataPath);
+        }
+    });
+
+    connect(saveLogBtn, &QPushButton::clicked, this, [this]() {
+        QDir logDir(QCoreApplication::applicationDirPath());
+        if (!logDir.mkpath("LogFiles") || !logDir.cd("LogFiles")) {
+            testBrowser->append("日志目录创建失败。");
+            return;
+        }
+        const QString fileName = logDir.filePath(
+            QString("AudioLog_%1.txt").arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss")));
+        QFile file(fileName);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            testBrowser->append("日志保存失败：" + file.errorString());
+            return;
+        }
+        QTextStream stream(&file);
+        stream.setCodec("UTF-8");
+        stream << testBrowser->toPlainText();
+        testBrowser->append("日志已保存：" + fileName);
+    });
+
+    connect(newLeftBtn, &QPushButton::clicked, this, [this]() {
+        m_saveBothChannels = !m_saveBothChannels;
+        if (m_saveBothChannels) {
+            m_leftDataBuffer.clear();
+            m_rightDataBuffer.clear();
+            m_originalLeftDataBuffer.clear();
+            m_originalRightDataBuffer.clear();
+            m_bothDataCount = 0;
+            newLeftBtn->setText("停止采样");
+            testBrowser->append("开始记录合成信号采样数据。");
+        } else {
+            newLeftBtn->setText("采样记录");
+            testBrowser->append("合成信号采样记录已停止。");
+        }
+    });
+
+    connect(m_valueLineEdit, &QLineEdit::editingFinished, this, [this]() {
+        bool ok = false;
+        const int value = m_valueLineEdit->text().toInt(&ok);
+        if (!ok) {
+            m_valueLineEdit->clear();
+            return;
+        }
+        currentValue = qBound(0, value, 255);
+        valueDisplayLabel->setText(QString::number(currentValue));
+        m_valueLineEdit->setText(QString::number(currentValue));
+        updateVerticalSliderValue(currentValue);
+    });
 
     m_decreaseLongPressTimer = new QTimer(this);
-    m_decreaseLongPressTimer->setInterval(50);
-    m_decreaseLongPressTimer->setSingleShot(false);
-
     m_increaseLongPressTimer = new QTimer(this);
-    m_increaseLongPressTimer->setInterval(50);
-    m_increaseLongPressTimer->setSingleShot(false);
-
     m_volumeDownLongPressTimer = new QTimer(this);
-    m_volumeDownLongPressTimer->setInterval(50);
-    m_volumeDownLongPressTimer->setSingleShot(false);
-
     m_volumeUpLongPressTimer = new QTimer(this);
-    m_volumeUpLongPressTimer->setInterval(50);
-    m_volumeUpLongPressTimer->setSingleShot(false);
-
+    for (QTimer *timer : {m_decreaseLongPressTimer, m_increaseLongPressTimer,
+                          m_volumeDownLongPressTimer, m_volumeUpLongPressTimer}) {
+        timer->setInterval(50);
+    }
     currentValue = 255;
 
-    connect(decreaseValueBtn, &QPushButton::pressed, this, [=]() {
-        if (currentValue > 0) {
-            currentValue--;
-            valueDisplayLabel->setText(QString::number(currentValue));
-            updateVerticalSliderValue(currentValue);
+    auto lowerGain = [this]() {
+        if (currentValue <= 0) {
+            m_decreaseLongPressTimer->stop();
+            return;
         }
+        --currentValue;
+        valueDisplayLabel->setText(QString::number(currentValue));
+        updateVerticalSliderValue(currentValue);
+    };
+    auto raiseGain = [this]() {
+        if (currentValue >= 255) {
+            m_increaseLongPressTimer->stop();
+            return;
+        }
+        ++currentValue;
+        valueDisplayLabel->setText(QString::number(currentValue));
+        updateVerticalSliderValue(currentValue);
+    };
+    connect(decreaseValueBtn, &QPushButton::pressed, this, [lowerGain, this]() {
+        lowerGain();
         m_decreaseLongPressTimer->start();
     });
-    connect(decreaseValueBtn, &QPushButton::released, m_decreaseLongPressTimer, &QTimer::stop);
-    connect(m_decreaseLongPressTimer, &QTimer::timeout, this, [=]() {
-        if (currentValue > 0) {
-            currentValue--;
-            valueDisplayLabel->setText(QString::number(currentValue));
-            updateVerticalSliderValue(currentValue);
-        } else {
-            m_decreaseLongPressTimer->stop();
-        }
-    });
-
-    connect(increaseValueBtn, &QPushButton::pressed, this, [=]() {
-        if (currentValue < 255) {
-            currentValue++;
-            valueDisplayLabel->setText(QString::number(currentValue));
-            updateVerticalSliderValue(currentValue);
-        }
+    connect(decreaseValueBtn, &QPushButton::released,
+            m_decreaseLongPressTimer, &QTimer::stop);
+    connect(m_decreaseLongPressTimer, &QTimer::timeout, this, lowerGain);
+    connect(increaseValueBtn, &QPushButton::pressed, this, [raiseGain, this]() {
+        raiseGain();
         m_increaseLongPressTimer->start();
     });
-    connect(increaseValueBtn, &QPushButton::released, m_increaseLongPressTimer, &QTimer::stop);
-    connect(m_increaseLongPressTimer, &QTimer::timeout, this, [=]() {
-        if (currentValue < 255) {
-            currentValue++;
-            valueDisplayLabel->setText(QString::number(currentValue));
-            updateVerticalSliderValue(currentValue);
-        } else {
-            m_increaseLongPressTimer->stop();
-        }
-    });
+    connect(increaseValueBtn, &QPushButton::released,
+            m_increaseLongPressTimer, &QTimer::stop);
+    connect(m_increaseLongPressTimer, &QTimer::timeout, this, raiseGain);
 
-    connect(volumeDownBtn, &QPushButton::pressed, this, [=]() {
-        int currentVolume = hSlider->value();
-        if (currentVolume > 0) {
-            hSlider->setValue(currentVolume - 5);
-        }
+    auto lowerVolume = [this]() {
+        hSlider->setValue(qMax(hSlider->minimum(), hSlider->value() - 5));
+    };
+    auto raiseVolume = [this]() {
+        hSlider->setValue(qMin(hSlider->maximum(), hSlider->value() + 5));
+    };
+    connect(volumeDownBtn, &QPushButton::pressed, this, [lowerVolume, this]() {
+        lowerVolume();
         m_volumeDownLongPressTimer->start();
     });
-    connect(volumeDownBtn, &QPushButton::released, m_volumeDownLongPressTimer, &QTimer::stop);
-    connect(m_volumeDownLongPressTimer, &QTimer::timeout, this, [=]() {
-        int currentVolume = hSlider->value();
-        if (currentVolume > 0) {
-            hSlider->setValue(currentVolume - 5);
-        } else {
-            m_volumeDownLongPressTimer->stop();
-        }
-    });
-
-    connect(volumeUpBtn, &QPushButton::pressed, this, [=]() {
-        int currentVolume = hSlider->value();
-        if (currentVolume < 127) {
-            hSlider->setValue(currentVolume + 5);
-        }
+    connect(volumeDownBtn, &QPushButton::released,
+            m_volumeDownLongPressTimer, &QTimer::stop);
+    connect(m_volumeDownLongPressTimer, &QTimer::timeout, this, lowerVolume);
+    connect(volumeUpBtn, &QPushButton::pressed, this, [raiseVolume, this]() {
+        raiseVolume();
         m_volumeUpLongPressTimer->start();
     });
-    connect(volumeUpBtn, &QPushButton::released, m_volumeUpLongPressTimer, &QTimer::stop);
-    connect(m_volumeUpLongPressTimer, &QTimer::timeout, this, [=]() {
-        int currentVolume = hSlider->value();
-        if (currentVolume < 127) {
-            hSlider->setValue(currentVolume + 5);
+    connect(volumeUpBtn, &QPushButton::released,
+            m_volumeUpLongPressTimer, &QTimer::stop);
+    connect(m_volumeUpLongPressTimer, &QTimer::timeout, this, raiseVolume);
+
+    connect(newBtn1, &QPushButton::clicked, this, [this, deviceLabel]() {
+        if (serialPort->isOpen()) {
+            deviceLabel->setText("● 设备已连接");
+            deviceLabel->setProperty("connected", true);
+            deviceLabel->style()->unpolish(deviceLabel);
+            deviceLabel->style()->polish(deviceLabel);
+            newBtn1->setText("✓ 已连接");
+            recorderBt->setEnabled(true);
+            commandBt1->setEnabled(true);
+            commandBt6->setEnabled(true);
+            commandBt3->setEnabled(true);
+            newBtn2->setEnabled(true);
         } else {
-            m_volumeUpLongPressTimer->stop();
+            deviceLabel->setText("● 连接失败");
+            testBrowser->append("采集设备连接失败，请检查设备与权限。");
+            newBtn1->setEnabled(true);
         }
     });
-
-    connect(hSlider, &QSlider::valueChanged, this, &AudioRecorder::updateHValueFromSlider);
 }
+
 
 
 
@@ -1749,6 +1577,8 @@ void AudioRecorder::recorderBtClicked()
         m_inputDevice = m_audioInput->start();
         if (!m_inputDevice) {
             qWarning() << "无法启动音频输入设备。";
+            testBrowser->append("音频输入设备启动失败。");
+            modeLabel->setText("当前模式：听音设备不可用");
             return;
         }
 
@@ -1756,33 +1586,42 @@ void AudioRecorder::recorderBtClicked()
         if (!m_outputDevice) {
             qWarning() << "无法启动音频输出设备。";
             m_audioInput->stop();
+            testBrowser->append("监听输出设备启动失败。");
+            modeLabel->setText("当前模式：监听输出不可用");
             return;
         }
 
-        // 连接 readyRead 信号从 m_inputDevice 而不是 m_audioInput
-        connect(m_inputDevice, &QIODevice::readyRead, this, &AudioRecorder::handleAudioInput);
+        connect(m_inputDevice, &QIODevice::readyRead,
+                this, &AudioRecorder::handleAudioInput, Qt::UniqueConnection);
 
-        // 显示录音时长标签
-        countLabel->setText("已录制 0 s");
-        recordTimer->start(1000); // 每秒更新时间
-
-        recorderBt->setText("停止");
+        m_recordedSeconds = 0;
+        countLabel->setText("工作时间 0 s");
+        recordTimer->start(1000);
+        recorderBt->setText("■ 停止听音");
+        modeLabel->setText("当前模式：听音模式");
+        testBrowser->append("听音模式已启动。");
         isRecording = true;
+        return;
     }
 
+    m_audioInput->stop();
+    m_audioOutput->stop();
+    recordTimer->stop();
+    m_inputDevice = nullptr;
+    m_outputDevice = nullptr;
+    isRecording = false;
+    recorderBt->setText("▶ 开始听音");
+    modeLabel->setText("当前模式：听音已暂停");
+    testBrowser->append("听音模式已停止。");
 }
 
 void AudioRecorder::executeBtClicked()
 {
-    // 创建 QProcess 对象
-    QString program = "./jqv1.2 RPMsg_UART_CM4.elf";
-
-    // 启动外部程序，使用 startDetached 保证外部程序独立运行
-    QProcess::startDetached(program);
-
-    // 退出当前程序
+    const QString launcher = QDir(QCoreApplication::applicationDirPath()).filePath("jqv1.2");
+    if (QFileInfo::exists(launcher)) {
+        QProcess::startDetached(launcher, QStringList() << "RPMsg_UART_CM4.elf");
+    }
     QCoreApplication::quit();
-
 }
 
 
@@ -1860,9 +1699,6 @@ void AudioRecorder::saveRawDataToTxt(const QByteArray &buffer)
 //{
 //    if (!m_newWindow) {
 //        m_newWindow = new NewWindow(this);
-//        // 新增：连接左声道强度信号与槽
-//          connect(this, &AudioRecorder::leftChannelLevelUpdated,
-//                  m_newWindow, &NewWindow::setLeftChannelLevel);
 //    }
 //    m_newWindow->show();
 //    m_newWindow->activateWindow();
@@ -1873,38 +1709,50 @@ void AudioRecorder::saveRawDataToTxt(const QByteArray &buffer)
 void AudioRecorder::commandBt1Clicked() {
     if (!m_newWindow) {
         m_newWindow = new NewWindow(this);
-        // 已有的左声道强度信号连接（保留）
-        connect(this, &AudioRecorder::leftChannelLevelUpdated,
-                m_newWindow, &NewWindow::setLeftChannelLevel);
-
-        // 新增：无论m_barChartWindow是否已创建，都连接信号
-        // （Qt会自动处理对象销毁后的连接失效，无需手动断开）
-        connect(m_newWindow, &NewWindow::filteredIntensityUpdated,
-                this, &AudioRecorder::onFilteredIntensityReceived);
-
-        connect(m_newWindow, &NewWindow::destroyed, this, [=]() {
+        m_newWindow->setAttribute(Qt::WA_DeleteOnClose);
+        connect(m_newWindow, &NewWindow::centerFrequencyChanged,
+                this, &AudioRecorder::onCenterFrequencyChanged);
+        connect(m_newWindow, &NewWindow::destroyed, this, [this]() {
             m_newWindow = nullptr;
+            show();
         });
-        // 同步当前强度值（保留）
-        m_newWindow->setLeftChannelLevel(leftChannelLevel);
+        m_newWindow->setCenterFrequency(ychz);
     }
     m_newWindow->show();
-    m_newWindow->activateWindow();
+    m_newWindow->raise();
+    hide();
 }
 
 
 // 实现槽函数
 void AudioRecorder::onCenterFrequencyChanged(double newFreq)
 {
-    // 更新本地中心频率参数
-    m_centerFreq = newFreq;
+    const int targetFrequency = qBound(100, qRound(newFreq / 100.0) * 100, 20000);
+    if (targetFrequency == ychz)
+        return;
+    if (!serialPort->isOpen()) {
+        testBrowser->append("频率调整失败：请先点击“远程连接”。");
+        return;
+    }
 
-    // 可以在这里添加需要的后续处理，例如：
-    // 1. 更新UI显示
-    qDebug() << "中心频率已更新为：" << newFreq;
-    // 2. 应用新的频率参数到滤波器
-    // 3. 记录日志等
-    testBrowser->append(QString("中心频率已调整为：%1 Hz").arg(newFreq));
+    const bool increase = targetFrequency > ychz;
+    // 与另一核心约定的频率步进协议：on=+100 Hz，off=-100 Hz。
+    const QByteArray command = increase ? QByteArray("led2_on") : QByteArray("led2_off");
+    if (serialPort->write(command) != command.size()) {
+        testBrowser->append("中心频率命令发送失败：" + serialPort->errorString());
+        return;
+    }
+    serialPort->flush();
+    ychz += increase ? 100 : -100;
+    newBtn3->setText(QString("%1 Hz").arg(ychz));
+    if (m_newWindow)
+        m_newWindow->setCenterFrequency(ychz);
+    m_recentFilteredIntensities.clear();
+    m_globalMaxFilteredIntensity = 0.0;
+    globalMaxLabel->setText("稳定强度：采集中");
+    testBrowser->append(QString("已发送 %1，硬件中心频率调整为 %2 Hz")
+                        .arg(QString::fromLatin1(command))
+                        .arg(ychz));
 }
 
 
@@ -1990,7 +1838,7 @@ void AudioRecorder::saveBothFilteredData(const QVector<double>& /*filteredLeftDa
             // 自动停止保存
             m_saveBothChannels = false;
             if (newLeftBtn) { // 空指针保护
-                newLeftBtn->setText("保存");
+                newLeftBtn->setText("采样记录");
             }
             return;
         }
@@ -2028,159 +1876,118 @@ void AudioRecorder::handleAudioInput()
     if (!m_inputDevice || !m_outputDevice)
         return;
 
-    QByteArray buffer = m_inputDevice->readAll();
+    const QByteArray buffer = m_inputDevice->readAll();
     if (buffer.isEmpty())
         return;
 
-    // 实时播放音频
     m_outputDevice->write(buffer);
+    writeRawToWav(buffer);
+    writeFilteredToWav(buffer);
 
-    // 初始化波形窗口
-    if (m_newWindow == nullptr) {
-        m_newWindow = new NewWindow(this);
-        connect(this, &AudioRecorder::leftChannelSamples, m_newWindow, &NewWindow::updateWaveform);
-
-
-        connect(m_newWindow, &NewWindow::centerFrequencyChanged,
-                this, &AudioRecorder::onCenterFrequencyChanged);
-
-        m_newWindow->show(); // 必须显示窗口才能看到波形
+    const QAudioFormat format = m_audioInput->format();
+    const int bytesPerSample = format.sampleSize() / 8;
+    const int channelCount = format.channelCount();
+    const int frameSize = bytesPerSample * channelCount;
+    if (!format.isValid() ||
+        format.sampleType() != QAudioFormat::SignedInt ||
+        bytesPerSample != 2 ||
+        channelCount < 1 ||
+        frameSize <= 0) {
+        return;
     }
 
-    // ================= 提取左右声道原始波形数据 =================
-    QVector<double> leftChannelData;
-    QVector<double> rightChannelData;
-
-
-
-
-    QAudioFormat format = m_audioInput->format(); // 获取音频格式
-    if (format.isValid()) {
-        int bytesPerSample = format.sampleSize() / 8; // 每个样本的字节数
-        int channelCount = format.channelCount();     // 声道数（立体声为2）
-        int frameSize = bytesPerSample * channelCount; // 每帧字节数
-        int frameCount = buffer.size() / frameSize;    // 总帧数
-
-        const char *data = buffer.constData();
-
-        for (int i = 0; i < frameCount; ++i) {
-            // 提取左声道数据（索引0）
-            int leftChannelPos = i * frameSize + 0 * bytesPerSample;
-            // 提取右声道数据（索引1）
-            int rightChannelPos = i * frameSize + 1 * bytesPerSample;
-
-            if (format.sampleType() == QAudioFormat::SignedInt && bytesPerSample == 2) {
-                qint16 leftSample, rightSample;
-                // 左声道
-                memcpy(&leftSample, data + leftChannelPos, bytesPerSample);
-                leftChannelData.append(static_cast<double>(leftSample));
-
-                // 右声道
-                memcpy(&rightSample, data + rightChannelPos, bytesPerSample);
-                rightChannelData.append(static_cast<double>(rightSample));
-            }
-        }
-    }
-
-
-    m_newWindow->updateSpectrumBars(leftChannelData);  // 传入左声道数据
-
-
-
-    // 以下是原有的音量强度显示逻辑（保持不变）
-    QVector<qreal> levels = getBufferLevels(buffer);
-
-
-    // 初始化左右声道强度值
-    qreal leftChannelLevel = 0.0;
-    qreal rightChannelLevel = 0.0;
-
-    // 获取左声道强度（索引0）
-    if (levels.count() >= 1) {
-        leftChannelLevel = levels.at(0);
-        // 更新左声道最大值
-        if (leftChannelLevel > m_maxLeftChannelLevel) {
-            m_maxLeftChannelLevel = leftChannelLevel;
-        }
-
-
-
-    }
-
-    // 获取右声道强度（索引1）
-    if (levels.count() >= 2) {
-        rightChannelLevel = levels.at(1);
-        // 更新右声道最大值（需在类中添加m_maxRightChannelLevel成员变量）
-        if (rightChannelLevel > m_maxRightChannelLevel) {
-            m_maxRightChannelLevel = rightChannelLevel;
-        }
-    }
-
-
-
-    // 合并左右声道实时强度到左声道标签
-    leftChannelLevelLabel->setText(
-                QString("强度: 左%1% | 右%2%")
-                .arg(leftChannelLevel * 100, 0, 'f', 2)
-                .arg(rightChannelLevel * 100, 0, 'f', 2)
-                );
-
-
-
-    // 合并左右声道最大值到左声道最大值标签
-    maxLeftChannelLevelLabel->setText(
-                QString("最强: 左%1% | 右%2%")
-                .arg(m_maxLeftChannelLevel * 100, 0, 'f', 2)
-                .arg(m_maxRightChannelLevel * 100, 0, 'f', 2)
-                );
-
-
-      saveBothFilteredData(QVector<double>(), QVector<double>(), leftChannelData, rightChannelData);
-
-}
-
-
-
-QVector<qreal> AudioRecorder::getBufferLevels(const QByteArray &buffer)
-{
-    QVector<qreal> values;
-
-    // 获取音频格式
-    QAudioFormat format = m_audioInput->format();
-    if (!format.isValid())
-        return values;
-
-    int bytesPerSample = format.sampleSize() / 8;
-    int channelCount = format.channelCount();
-    int frameSize = bytesPerSample * channelCount;
-    int frameCount = buffer.size() / frameSize;
-
-    values.fill(0, channelCount);
-
+    const int frameCount = buffer.size() / frameSize;
     const char *data = buffer.constData();
+    QVector<double> combinedSignal;
+    combinedSignal.reserve(frameCount);
 
+    double peak = 0.0;
     for (int i = 0; i < frameCount; ++i) {
-        for (int ch = 0; ch < channelCount; ++ch) {
-            qreal sample = 0.0;
-
-            // 处理不同的样本类型
-            if (format.sampleType() == QAudioFormat::SignedInt) {
-                if (bytesPerSample == 2) { // 16-bit
-                    qint16 value;
-                    memcpy(&value, data + i * frameSize + ch * bytesPerSample, bytesPerSample);
-                    sample = qAbs(static_cast<qreal>(value)) / static_cast<qreal>(SHRT_MAX);
-                }
-                // 可以添加更多样本大小的处理
-            }
-            // 可以添加更多样本类型的处理
-
-            if (sample > values[ch])
-                values[ch] = sample;
+        qint16 firstChannel = 0;
+        qint16 secondChannel = 0;
+        memcpy(&firstChannel, data + i * frameSize, sizeof(qint16));
+        if (channelCount > 1) {
+            memcpy(&secondChannel,
+                   data + i * frameSize + bytesPerSample,
+                   sizeof(qint16));
+        } else {
+            secondChannel = firstChannel;
         }
+
+        const double sample =
+            (static_cast<double>(firstChannel) + static_cast<double>(secondChannel)) / 2.0;
+        combinedSignal.append(sample);
+        peak = qMax(peak, qAbs(sample));
     }
 
-    return values;
+    if (combinedSignal.isEmpty())
+        return;
+
+    updateMainSpectrum(combinedSignal);
+    if (m_newWindow && m_newWindow->isVisible())
+        m_newWindow->updateSpectrumBars(combinedSignal);
+
+    const qreal signalLevel = qBound(0.0, peak / static_cast<double>(SHRT_MAX), 1.0);
+    m_maxSignalLevel = qMax(m_maxSignalLevel, signalLevel);
+    const qreal signalPercent = signalLevel * 100.0;
+    progressBar[0]->setValue(qRound(signalPercent));
+
+    signalLevelLabel->setText(
+        QString("实时强度：%1%").arg(signalPercent, 0, 'f', 1));
+    maxSignalLevelLabel->setText(
+        QString("原始峰值：%1%").arg(m_maxSignalLevel * 100.0, 0, 'f', 1));
+
+    if (++m_intensityUpdateCounter >= m_intensityUpdateThreshold) {
+        m_intensityUpdateCounter = 0;
+        onFilteredIntensityReceived(signalPercent);
+    }
+
+    saveBothFilteredData(QVector<double>(), QVector<double>(),
+                         combinedSignal, combinedSignal);
 }
+
+void AudioRecorder::updateMainSpectrum(const QVector<double> &samples)
+{
+    if (!m_liveSpectrumPlot || samples.isEmpty())
+        return;
+
+    const int fftSize = 4096;
+    m_spectrumSamples += samples;
+    if (m_spectrumSamples.size() > fftSize) {
+        m_spectrumSamples.remove(0, m_spectrumSamples.size() - fftSize);
+    }
+
+    if (m_spectrumSamples.size() < fftSize ||
+        ++m_spectrumUpdateCounter < m_spectrumUpdateInterval || !isVisible()) {
+        return;
+    }
+    m_spectrumUpdateCounter = 0;
+    const double sampleRate = qMax(1, m_audioInput->format().sampleRate());
+
+    QVector<std::complex<double>> input;
+    input.reserve(fftSize);
+    for (int i = 0; i < fftSize; ++i) {
+        const double window = 0.5 - 0.5 * qCos(2.0 * M_PI * i / (fftSize - 1));
+        input.append(std::complex<double>(m_spectrumSamples.at(i) * window / 32768.0, 0.0));
+    }
+    const QVector<std::complex<double>> spectrum = NewWindow::fft(input);
+
+    QVector<double> frequencies;
+    QVector<double> amplitudes;
+    for (int i = 1; i < fftSize / 2; ++i) {
+        const double frequency = i * sampleRate / fftSize;
+        if (frequency < 100.0)
+            continue;
+        if (frequency > 1000.0)
+            break;
+        frequencies.append(frequency);
+        amplitudes.append(qMin(1.0, 4.0 * std::abs(spectrum.at(i)) / fftSize));
+    }
+
+    m_liveSpectrumPlot->graph(0)->setData(frequencies, amplitudes);
+    m_liveSpectrumPlot->replot();
+}
+
 
 
 
@@ -2188,58 +1995,32 @@ QVector<qreal> AudioRecorder::getBufferLevels(const QByteArray &buffer)
 
 void AudioRecorder::updateProgress()
 {
-    static qint64 recordedSeconds = 0;
-    recordedSeconds += 1; // 增加1秒
-    countLabel->setText(QString("工作时间 %1 s").arg(recordedSeconds));
+    ++m_recordedSeconds;
+    countLabel->setText(QString("工作时间 %1 s").arg(m_recordedSeconds));
 }
 
 void AudioRecorder::commandBt2Clicked()
 {
-    // 重置左右声道最大值变量
-    m_maxLeftChannelLevel = 0;
-    m_maxRightChannelLevel = 0;
+    // 重置当前合成信号的测点数据
+    m_maxSignalLevel = 0;
 
-    m_globalMaxFilteredIntensity=0;
-    globalMaxLabel->setText(
-                QString("滤强: %1%").arg(m_globalMaxFilteredIntensity, 0, 'f', 1)
-                );
+    m_globalMaxFilteredIntensity = 0;
+    m_recentFilteredIntensities.clear();
+    globalMaxLabel->setText("稳定强度：采集中");
 
-    // 在同一个标签上合并显示左右声道的最大值重置信息
-    maxLeftChannelLevelLabel->setText(
-                QString("声道强度: 左=0% | 右=0%")
-                );
+    maxSignalLevelLabel->setText("原始峰值：0%");
+    testBrowser->append("当前测点的稳定强度采样已重置。");
 }
 
 
 void AudioRecorder::commandBt3Clicked()
 {
-
-    //    system(" amixer -c 0 cset numid=1   0");
-
-    ychz += 100;
-    QByteArray data = "led2_on";  // 假设我们要发送的测试数据
-    serialPort->write(data);
-    // 更新现有按钮的文本，显示当前频率值
-    newBtn3->setText(QString("频率: %1").arg(ychz));
-
-
+    onCenterFrequencyChanged(ychz + 100);
 }
 
 void AudioRecorder::commandBt6Clicked()
 {
-    ////    system("echo 128 > /sys/devices/platform/soc/40015000.i2c/i2c-2/2-002c/rdac1");  // 执行第一个命令
-    ////    system("echo 128 > /sys/devices/platform/soc/40015000.i2c/i2c-2/2-002c/rdac0");  // 执行第一个命令
-
-
-    //    system(" amixer -c 0 cset numid=1   127");
-
-
-    ychz = qMax(0, ychz - 100);  // 允许频率降低到0Hz
-    QByteArray data = "led2_off";  // 假设我们要发送的测试数据
-    serialPort->write(data);
-
-    // 更新现有按钮的文本，显示当前频率值
-    newBtn3->setText(QString("频率: %1").arg(ychz));
+    onCenterFrequencyChanged(ychz - 100);
 }
 
 
@@ -2298,30 +2079,38 @@ void AudioRecorder::scanSerialPort()
 
 // 实现新按钮的槽函数
 void AudioRecorder::newBtn1Clicked() {
-    qDebug() << "新按钮1被点击";
-    // 添加按钮1的功能代码
-
-    // 禁用按钮，防止重复点击
-    newBtn1->setEnabled(false);
-    // 可选：改变按钮样式以直观显示已禁用
-    newBtn1->setStyleSheet("background-color: black; color: lightgray;");
-
-    QFile file("/dev/ttyRPMSG0");
-    if (!file.exists()) {
-        system("cd /lib/firmware");
-        QString fw = tr("echo %1 > /sys/class/remoteproc/remoteproc0/firmware").arg(firmware);
-        system(fw.toLatin1().data());
-        system("echo start > /sys/class/remoteproc/remoteproc0/state");
-        system("echo start > /dev/ttyRPMSG0");
-        system("sleep 1");
-        scanSerialPort();
-
+    if (serialPort->isOpen()) {
+        testBrowser->append("采集设备已经连接。");
+        return;
     }
 
+    const QString rpmsgPort = "/dev/ttyRPMSG0";
+#ifdef Q_OS_LINUX
+    if (!QFileInfo::exists(rpmsgPort) && !firmware.isEmpty()) {
+        QFile firmwareControl("/sys/class/remoteproc/remoteproc0/firmware");
+        QFile stateControl("/sys/class/remoteproc/remoteproc0/state");
+        if (firmwareControl.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            firmwareControl.write(firmware.toLocal8Bit());
+            firmwareControl.close();
+        }
+        if (stateControl.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            stateControl.write("start");
+            stateControl.close();
+            QThread::msleep(1000);
+        }
+    }
+#endif
+    if (QFileInfo::exists(rpmsgPort)) {
+        serialPort->setPortName(rpmsgPort);
+    } else {
+        scanSerialPort();
+    }
 
+    if (serialPort->portName().isEmpty()) {
+        testBrowser->append("未发现可用串口。");
+        return;
+    }
 
-    // 固定参数配置
-    serialPort->setPortName("/dev/ttyRPMSG0");  // 固定设备名
     serialPort->setBaudRate(115200);           // 固定波特率
     serialPort->setDataBits(QSerialPort::Data8); // 8位数据位
     serialPort->setParity(QSerialPort::NoParity); // 无校验
@@ -2332,31 +2121,24 @@ void AudioRecorder::newBtn1Clicked() {
 
     // 尝试打开串口
     if (!serialPort->open(QIODevice::ReadWrite)) {
-        QString errorMsg = QString("串口打开失败!\n"
-                                   "设备: %1\n"
-                                   "错误: %2\n"
-                                   "可能原因:\n"
-                                   "1. 设备不存在\n"
-                                   "2. 权限不足(尝试: sudo chmod 666 /dev/ttyRPMSG0)\n"
-                                   "3. 串口已被占用")
-                .arg(serialPort->portName())
-                .arg(serialPort->errorString());
-
+        testBrowser->append(QString("串口 %1 打开失败：%2")
+                            .arg(serialPort->portName(), serialPort->errorString()));
     } else {
-
-
-        qDebug() << "串口已打开 - 配置: 115200 8N1";
+        newBtn1->setEnabled(false);
+        testBrowser->append(QString("设备已连接：%1（115200 8N1）")
+                            .arg(serialPort->portName()));
     }
-
 }
 
 
 void AudioRecorder::newBtn2Clicked() {
-    qDebug() << "新按钮2被点击";
-    // 添加按钮2的功能代码
-
-    QByteArray data = "led1_on";  // 假设我们要发送的测试数据
-    serialPort->write(data);
+    if (!serialPort->isOpen()) {
+        testBrowser->append("获取数据失败：设备尚未连接。");
+        return;
+    }
+    // 与另一核心约定的数据获取协议。
+    serialPort->write("led1_on");
+    testBrowser->append("已向采集设备发送数据请求。");
 
 //    switch(ycyl) {
 //    case 0: ycyl = 30; break;
@@ -2378,17 +2160,8 @@ void AudioRecorder::newBtn3Clicked() {
 }
 
 void AudioRecorder::newBtn4Clicked() {
-    qDebug() << "新按钮4被点击";
-    // 添加按钮4的功能代码
-//扫频
-//    QByteArray data = "led1_off";  // 假设我们要发送的测试数据
-//    serialPort->write(data);
-
-    // 仅在 testBrowser 显示“删除”文本（可根据需求调整文本内容）
-       testBrowser->append("删除");
-       // 可选：让文本自动滚动到最新一行（避免被遮挡）
-       testBrowser->moveCursor(QTextCursor::End);
-
+    testBrowser->clear();
+    testBrowser->append("日志已清空。");
 }
 
 

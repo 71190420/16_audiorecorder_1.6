@@ -41,11 +41,11 @@ class AudioRecorder : public QMainWindow
     Q_OBJECT
 
 public:
-    AudioRecorder(QWidget *parent = nullptr,QString firmware = nullptr);
+    AudioRecorder(QWidget *parent = nullptr, QString firmware = QString());
     ~AudioRecorder();
 
     int   ycyl=0;
-    int   ychz=0;
+    int   ychz=500;
 
     QVector<double> findAllSolutions(double tol);
 
@@ -61,19 +61,12 @@ signals:
 
 
 
-    // 声明信号，用于发送最大左声道音频强度
-    void maxLeftChannelLevelUpdated(qreal maxLevel);
-
-    void leftChannelSamples(const QVector<double>& samples);
-    // 新增：发送左声道强度到NewWindow
-    void leftChannelLevelUpdated(qreal level);
-
 private:
 
      QLineEdit *m_valueLineEdit;
     // 新增：强度更新频率控制
     int m_intensityUpdateCounter = 0;       // 强度更新计数器
-    const int m_intensityUpdateThreshold = 10; // 更新阈值（可调整，3=原频率的1/3）
+    const int m_intensityUpdateThreshold = 3;
     gps *m_gpsWindow = nullptr;  // 现在编译器能识别 gps 类了
     double m_latitude = 0.0;
     double m_longitude = 0.0;
@@ -83,11 +76,6 @@ private:
     QLabel *volumeValueLabel;  // 新增：音量值显示标签
 
     QSlider *vSlider;  // 新增：垂直音量滑块
-    // 添加这一行声明
-    qreal leftChannelLevel;  // 左声道强度值
-    QProgressBar *leftLevelBar; // 左声道强度柱状图（用进度条实现）
-
-
 
     QPushButton* m_restorePcmBtn; // 新增：还原功能按钮
 
@@ -163,6 +151,9 @@ private:
     BarChartMainWindow *m_barChartWindow = nullptr; // 基于QMainWindow的窗口指针
 
     double m_globalMaxFilteredIntensity = 0.0; // 全局最大滤波强度（百分比）
+    QVector<double> m_recentFilteredIntensities;
+    QCustomPlot *m_liveSpectrumPlot = nullptr;
+    QVector<double> m_spectrumSamples;
 
     // 新增：全局最大滤强相关声明
     QLabel *globalMaxLabel;               // 显示全局最大滤强的UI标签
@@ -173,19 +164,6 @@ private:
 
     QLabel *modeLabel;  // 新增Label的成员变量声明
     double m_normalizedValue = 0.0;  // 保存从NewWindow传递的normalized值
-
-    //滤波
-    // 新增：与NewWindow一致的滤波器和增益参数
-    double m_sampleRate = 44100;
-    double m_centerFreq = 500;
-    double m_bandwidth = 100;
-    double m_totalGain = 1.0;  // 保存与NewWindow一致的总增益
-
-    // 滤波函数声明
-    QVector<double> butterworthBandpassFilter(const QVector<double> &data);
-    // 从滤波数据计算强度的函数声明
-    QVector<qreal> getBufferLevelsFromFilteredData(const QVector<double> &filteredData, const QAudioFormat &format);
-
 
     bool m_saveReceivedData = false; // 用于控制是否保存数据的标志位
     // 添加这个函数声明
@@ -257,7 +235,7 @@ private:
     /* 布局初始化 */
     void layoutInit();
     // 添加以下成员变量声明
-    QLabel *leftChannelLevelLabel; // 左声道强度标签
+    QLabel *signalLevelLabel; // 合成信号实时强度
     QPushButton *commandBt1; // 新增按钮
     QPushButton *commandBt2; // 新增按钮
     QPushButton *commandBt3; // 新增按钮
@@ -276,15 +254,11 @@ private:
     QPushButton *increaseBtn;  // 增大按钮
     QLabel *aValueLabel;       // a值显示标签
     double a;                  // a的当前值（类成员，非全局）
-    // 新增成员变量，用于保存左声道音频强度的最大值
-    qreal m_maxLeftChannelLevel;
-    // 新增 QLabel 用于显示最大值
-    QLabel *maxLeftChannelLevelLabel;
+    qreal m_maxSignalLevel;
+    QLabel *maxSignalLevelLabel;
 
 
 
-
-    qreal m_maxRightChannelLevel;  // 新增的右声道最大值
 
     QLabel *i0Label;
     QPushButton *i0Btn;
@@ -353,9 +327,7 @@ private:
 
     /* 处理音频输入 */
     void handleAudioInput();
-
-    /* 获取缓冲区的音频级别 */
-    QVector<qreal> getBufferLevels(const QByteArray &buffer);
+    void updateMainSpectrum(const QVector<double> &samples);
 
     /* 更新时间标签 */
     void updateProgress();
@@ -370,6 +342,7 @@ private:
     QIODevice *m_outputDevice;
     bool isRecording;
     QTimer *recordTimer;
+    qint64 m_recordedSeconds = 0;
 
 
 
@@ -378,8 +351,6 @@ private slots:
     // 新增：接收NewWindow发送的滤强数据
        void onFilteredIntensityReceived(double intensity);
 
-
-    void onLevelUpdated(qreal level);
 
     void onRestorePcmBtnClicked();
     // 原始音频保存/播放

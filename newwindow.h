@@ -24,13 +24,8 @@ public:
 
     void updateWaveform(const QVector<double> &waveData);
 
-
-    void setBandpassParams(double sampleRate, double centerFreq, double bandwidth);
-
-    // 添加接收左声道强度的槽函数
-    void setLeftChannelLevel(qreal level);
-
-    void setFilterFrequencyRange(double minFreq, double maxFreq);
+    void setCenterFrequency(double frequency);
+    static QVector<std::complex<double>> fft(const QVector<std::complex<double>>& x);
 
 signals:
     // 声明传递归一化值的信号
@@ -74,9 +69,8 @@ private:
     QVector<double> m_intensityBuffer;   // 最近10次强度（可保留，不冲突）
 
     // ===== 记录任务状态 =====
-    bool m_recording = false;    // 是否正在等待10次
-    int  m_recordCount = 0;      // 已收集次数（0~10）
-    double m_recordSum = 0.0;    // 10次累计和
+    bool m_recording = false;
+    QVector<double> m_recordSamples;
 
     // ===== 柱状图 =====
     QVector<double> m_avgHistory; // 每次记录完成后的平均值（柱子高度）
@@ -89,19 +83,13 @@ private:
     Ui::NewWindow *ui;
     QVector<double> m_xData;
 
-    // 巴特沃斯带通滤波器所需参数
+    // 硬件选频参数
     double m_sampleRate=44100;    // 采样率
     double m_centerFreq=500;    // 中心频率
-    double m_bandwidth=10;     // 带宽
 
-    QRadioButton *radioButton;
-    QRadioButton *radioButton_2;
     QLabel *label_5;
-    QLabel *label_7;
     QPushButton *pushButton_2;
     QPushButton *pushButton_3;
-    int label5Size=100;  // label_5的当前大小
-    int label7Size=1500;  // label_7的当前大小
     // 新增：从label5/7获取的滤波范围
     double m_filterMinFreq;  // 频率下限（来自label5）
     double m_filterMaxFreq;  // 频率上限（来自label7）
@@ -109,24 +97,10 @@ private:
     // FFT和绘图参数
     const int FFT_SIZE = 512;       // FFT点数（需为2的幂）
     const double SAMPLE_RATE = 44100;// 采样率
-    const double MIN_FREQ = 100;     // 下限频率
-    const double MAX_FREQ = 2000;    // 上限频率
-
     QCPBars *m_spectrumBars;         // 柱状频谱图对象
 
-    // FFT计算函数
-    QVector<std::complex<double>> fft(const QVector<std::complex<double>>& x);
-
-    // 添加辅助函数声明（关键缺失部分）
-    QVector<double> applySecondOrderSection(const QVector<double>& input,
-                                            double b0, double b1, double b2,
-                                            double a1, double a2);
-
-    // 带通滤波核心函数
-    QVector<double> butterworthBandpassFilter(const QVector<double> &data);
-
     int m_labelUpdateCounter = 0;  // label_3更新计数器
-    const int m_labelUpdateThreshold = 10;  // 更新阈值（每10次数据更新一次label）
+    const int m_labelUpdateThreshold = 3;
 
 
 

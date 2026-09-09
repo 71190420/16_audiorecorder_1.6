@@ -1,5 +1,4 @@
 #include "audiorecorder.h"
-#include "ui_testwidget.h"
 #include <QApplication>
 #include <QFile>
 #include <QDebug>  // 用于调试输出
@@ -24,8 +23,9 @@ int main(int argc, char *argv[])
         file.close();
     }
 
-    // 创建AudioRecorder实例
-    AudioRecorder w(nullptr, QString(argv[1]));
+    // 固件名为可选参数，桌面预览时无需额外参数也能启动。
+    const QString firmware = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QString();
+    AudioRecorder w(nullptr, firmware);
     // 显示窗口
     w.show();
     return a.exec();

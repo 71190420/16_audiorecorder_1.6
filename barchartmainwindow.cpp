@@ -463,6 +463,10 @@
 #include <QDebug>
 #include <cmath>
 #include <vector>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QVBoxLayout>
 
 
 //1原始算法
@@ -754,11 +758,11 @@ void BarChartMainWindow::calculateForCurrentAValue()
 
     if (ui->label_2) {
         ui->label_2->setText(QString("%1 米").arg(h, 0, 'f', 3));
-        ui->label_2->setStyleSheet("font-size: 12pt; font-weight: bold; color: #000000;");
+        ui->label_2->setStyleSheet("font-size: 12pt; font-weight: bold; color: #54ff8b;");
     }
     if (ui->label_3) {
         ui->label_3->setText(QString("%1 米").arg(x0, 0, 'f', 3));
-        ui->label_3->setStyleSheet("font-size: 12pt; font-weight: bold; color: #000000;");
+        ui->label_3->setStyleSheet("font-size: 12pt; font-weight: bold; color: #73eaff;");
     }
 
     qDebug() << "===== 当前a值计算完成 =====";
@@ -1091,6 +1095,50 @@ BarChartMainWindow::BarChartMainWindow(QWidget *parent) :
     m_storedGlobalMax(0.0)
 {
     ui->setupUi(this);
+    setFixedSize(800, 480);
+    setWindowTitle("GPPL5000 · 七点定位分析");
+    menuBar()->hide();
+    statusBar()->hide();
+
+    QHBoxLayout *pageLayout = new QHBoxLayout(ui->centralwidget);
+    pageLayout->setContentsMargins(10, 8, 10, 8);
+    pageLayout->setSpacing(8);
+    pageLayout->addWidget(ui->ZZTwidget, 1);
+
+    QFrame *controlPanel = new QFrame(ui->centralwidget);
+    controlPanel->setObjectName("toolRail");
+    controlPanel->setFixedWidth(170);
+    QVBoxLayout *controlLayout = new QVBoxLayout(controlPanel);
+    QLabel *pageTitle = new QLabel("七点定位", controlPanel);
+    pageTitle->setObjectName("panelTitle");
+    ui->valueLabel->setText("当前强度：0.00%");
+    ui->pushButton_2->setText("记录当前点");
+    ui->pushButton_2->setProperty("role", "primary");
+    ui->pushButton_3->setText("清空七点数据");
+    ui->pushButton->setText("返回主界面");
+    ui->pushButton->setProperty("role", "danger");
+    ui->pushButton_4->setText("−");
+    ui->pushButton_4->setProperty("role", "step");
+    ui->pushButton_5->setText("+");
+    ui->pushButton_5->setProperty("role", "step");
+    QHBoxLayout *spacingLayout = new QHBoxLayout();
+    spacingLayout->addWidget(ui->pushButton_4);
+    spacingLayout->addWidget(ui->label);
+    spacingLayout->addWidget(ui->pushButton_5);
+    controlLayout->addWidget(pageTitle);
+    controlLayout->addWidget(ui->valueLabel);
+    controlLayout->addSpacing(8);
+    controlLayout->addWidget(new QLabel("测点间距 a（米）", controlPanel));
+    controlLayout->addLayout(spacingLayout);
+    controlLayout->addWidget(ui->pushButton_2);
+    controlLayout->addWidget(ui->pushButton_3);
+    controlLayout->addSpacing(8);
+    controlLayout->addWidget(ui->label_2);
+    controlLayout->addWidget(ui->label_3);
+    controlLayout->addStretch();
+    controlLayout->addWidget(ui->pushButton);
+    pageLayout->addWidget(controlPanel);
+
     // 初始化图表
     QCustomPlot *customPlot = ui->ZZTwidget;
     if (customPlot) {
@@ -1098,6 +1146,14 @@ BarChartMainWindow::BarChartMainWindow(QWidget *parent) :
         customPlot->yAxis->setLabel("V值");
         customPlot->xAxis->setRange(0, 6 * 0.5);  // 最大a=0.5时偏移量3米
         customPlot->yAxis->setRange(0, 100);
+        customPlot->setBackground(QBrush(QColor("#010503")));
+        for (QCPAxis *axis : {customPlot->xAxis, customPlot->yAxis}) {
+            axis->setBasePen(QPen(QColor("#4cbf78")));
+            axis->setTickPen(QPen(QColor("#4cbf78")));
+            axis->setTickLabelColor(QColor("#aee8bd"));
+            axis->setLabelColor(QColor("#d9f5df"));
+            axis->grid()->setPen(QPen(QColor("#173c28"), 1, Qt::DotLine));
+        }
         customPlot->replot();
     }
     ui->label->setText(QString("%1").arg(m_a, 0, 'f', 1));
@@ -1131,8 +1187,8 @@ void BarChartMainWindow::setGlobalMaxFilteredData(double globalMax)
     m_storedGlobalMax = globalMax;
    // qDebug() << "BarChartMainWindow最终接收：" << globalMax;  // 确保此行存在
     if (ui->valueLabel) {
-        ui->valueLabel->setText(QString("强: %1").arg(globalMax, 0, 'f', 2));
-        ui->valueLabel->setStyleSheet("font-size: 14pt; font-weight: bold; color: #e74c3c;");
+        ui->valueLabel->setText(QString("当前强度：%1%").arg(globalMax, 0, 'f', 2));
+        ui->valueLabel->setStyleSheet("font-size: 14pt; font-weight: bold; color: #54ff8b;");
     }
 }
 
@@ -1141,7 +1197,7 @@ void BarChartMainWindow::on_pushButton_clicked()
 {
     emit clearGlobalMaxFilteredIntensity();
     if (ui->valueLabel) {
-        ui->valueLabel->setText("强: 0.00");
+        ui->valueLabel->setText("当前强度：0.00%");
     }
     QWidget *mainWindow = this->parentWidget();
     if (mainWindow) mainWindow->show();
@@ -1151,7 +1207,10 @@ void BarChartMainWindow::on_pushButton_clicked()
 // 添加数据（满7个时触发计算）
 void BarChartMainWindow::on_pushButton_2_clicked()
 {
-    if (m_storedGlobalMax < 0) return;
+    if (m_storedGlobalMax <= 0) {
+        ui->valueLabel->setText("等待稳定周期信号…");
+        return;
+    }
 
     QCustomPlot *customPlot = ui->ZZTwidget;
     if (!customPlot) return;
@@ -1160,8 +1219,8 @@ void BarChartMainWindow::on_pushButton_2_clicked()
     QCPBars *bars = new QCPBars(customPlot->xAxis, customPlot->yAxis);
     bars->setParent(customPlot);
     bars->setData(QVector<double>() << m_barCount, QVector<double>() << m_storedGlobalMax);
-    bars->setBrush(QColor(52, 152, 219));
-    bars->setPen(QPen(QColor(52, 152, 219).darker(130)));
+    bars->setBrush(QColor(55, 224, 112, 210));
+    bars->setPen(QPen(QColor("#77ff9f")));
     bars->setWidth(0.6);
 
     // 调整坐标轴
@@ -1173,6 +1232,9 @@ void BarChartMainWindow::on_pushButton_2_clicked()
     // 保存数据
     m_dataBuffer.push_back(m_storedGlobalMax);
     m_barCount++;
+    m_storedGlobalMax = 0.0;
+    ui->valueLabel->setText("当前点已记录，请移动到下一点");
+    emit clearGlobalMaxFilteredIntensity();
 
     // 数据满7个时自动触发计算
     if (m_dataBuffer.size() >= 7) {

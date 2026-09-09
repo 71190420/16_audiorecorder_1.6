@@ -2,6 +2,9 @@
 #include "ui_gps.h"
 #include <QCoreApplication>
 #include <QTextStream>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QVBoxLayout>
 
 #include <QDebug>  // 新增：包含QDebug头文件
 gps::gps(QWidget *parent) :
@@ -10,14 +13,25 @@ gps::gps(QWidget *parent) :
     m_originalWindow(parent)  // 保存原窗口指针（从构造函数传入）
 {
     ui->setupUi(this);
-
-    // 设置textBrowser样式（优化显示效果）
-    ui->textBrowser->setStyleSheet(R"(
-        font-size: 18px;
-        padding: 10px;
-        background-color: #fafafa;
-        border: 1px solid #eee;
-    )");
+    setFixedSize(800, 480);
+    setWindowTitle("GPPL5000 · GPS 记录");
+    QVBoxLayout *pageLayout = new QVBoxLayout(this);
+    pageLayout->setContentsMargins(10, 8, 10, 8);
+    pageLayout->setSpacing(8);
+    QHBoxLayout *headerLayout = new QHBoxLayout();
+    QLabel *pageTitle = new QLabel("GPS 定位数据", this);
+    pageTitle->setObjectName("panelTitle");
+    ui->pushButton->setText("返回主界面");
+    ui->pushButton->setProperty("role", "danger");
+    ui->pushButton_2->setText("保存 GPS 记录");
+    ui->pushButton_2->setProperty("role", "primary");
+    headerLayout->addWidget(pageTitle);
+    headerLayout->addStretch();
+    headerLayout->addWidget(ui->pushButton_2);
+    headerLayout->addWidget(ui->pushButton);
+    pageLayout->addLayout(headerLayout);
+    ui->textBrowser->setObjectName("eventLog");
+    pageLayout->addWidget(ui->textBrowser, 1);
     ui->textBrowser->setReadOnly(true);
     // 初始显示标题（明确格式）
     ui->textBrowser->append("📡 GPS数据接收日志");
@@ -25,8 +39,6 @@ gps::gps(QWidget *parent) :
     ui->textBrowser->append("格式：序号（No.） | 纬度（8位小数） | 经度（8位小数）");
     ui->textBrowser->append("==================================");
 
-    // 绑定保存按钮（确保对象名是pushButton_2）
-    connect(ui->pushButton_2, &QPushButton::clicked, this, &gps::on_pushButton_2_clicked);
 }
 
 gps::~gps()

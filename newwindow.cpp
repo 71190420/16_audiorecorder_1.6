@@ -1,20 +1,76 @@
 #include "newwindow.h"
+#include "signalquality.h"
 #include "ui_newwindow.h"
 #include <cmath>
 #include <vector>
 #include <complex>  // 添加复数头文件
 #include <algorithm> // 用于std::max_element
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QVBoxLayout>
 
 NewWindow::NewWindow(QWidget *parent) :
     QMainWindow(parent),
     ui(new Ui::NewWindow)
 {
     ui->setupUi(this); // 先初始化UI
+    setFixedSize(800, 480);
+    setWindowTitle("GPPL5000 · 频谱分析");
+    statusBar()->hide();
+
+    QVBoxLayout *pageLayout = new QVBoxLayout(ui->centralwidget);
+    pageLayout->setContentsMargins(10, 8, 10, 8);
+    pageLayout->setSpacing(7);
+
+    QHBoxLayout *headerLayout = new QHBoxLayout();
+    QLabel *pageTitle = new QLabel("信号接收分析", ui->centralwidget);
+    pageTitle->setObjectName("panelTitle");
+    ui->label->setText("中心频率：500 Hz");
+    ui->label_3->setText("滤波强度：0%");
+    ui->pushButton->setText("返回主界面");
+    ui->pushButton->setProperty("role", "danger");
+    ui->pushButton_4->setText("记录强度");
+    ui->pushButton_4->setProperty("role", "secondary");
+    ui->pushButton_5->setText("清空记录");
+    headerLayout->addWidget(pageTitle);
+    headerLayout->addWidget(ui->label);
+    headerLayout->addStretch();
+    headerLayout->addWidget(ui->label_3);
+    headerLayout->addWidget(ui->pushButton_4);
+    headerLayout->addWidget(ui->pushButton_5);
+    headerLayout->addWidget(ui->pushButton);
+    pageLayout->addLayout(headerLayout);
+
+    pageLayout->addWidget(ui->myCustomPlot, 3);
+
+    QHBoxLayout *lowerLayout = new QHBoxLayout();
+    lowerLayout->setSpacing(8);
+    lowerLayout->addWidget(ui->widget, 1);
+    QFrame *frequencyPanel = new QFrame(ui->centralwidget);
+    frequencyPanel->setObjectName("toolRail");
+    frequencyPanel->setFixedWidth(150);
+    QVBoxLayout *frequencyLayout = new QVBoxLayout(frequencyPanel);
+    QLabel *frequencyTitle = new QLabel("硬件中心频率", frequencyPanel);
+    frequencyTitle->setObjectName("panelTitle");
+    ui->pushButton_2->setText("+100 Hz");
+    ui->pushButton_3->setText("−100 Hz");
+    ui->radioButton->hide();
+    ui->radioButton_2->hide();
+    ui->label_6->hide();
+    ui->label_7->hide();
+    ui->label_4->setText("软件版本 V1.6");
+    frequencyLayout->addWidget(frequencyTitle);
+    frequencyLayout->addWidget(ui->label_5);
+    frequencyLayout->addWidget(ui->pushButton_2);
+    frequencyLayout->addWidget(ui->pushButton_3);
+    frequencyLayout->addStretch();
+    frequencyLayout->addWidget(ui->label_4);
+    lowerLayout->addWidget(frequencyPanel);
+    pageLayout->addLayout(lowerLayout, 2);
+
        // 获取控件指针
-       radioButton = ui->radioButton;
-       radioButton_2 = ui->radioButton_2;
        label_5 = ui->label_5;
-       label_7 = ui->label_7;
        pushButton_2 = ui->pushButton_2;
        pushButton_3 = ui->pushButton_3;
 
@@ -22,8 +78,7 @@ NewWindow::NewWindow(QWidget *parent) :
        connect(pushButton_2, &QPushButton::clicked, this, &NewWindow::onAddClicked);
        connect(pushButton_3, &QPushButton::clicked, this, &NewWindow::onSubtractClicked);
 
-       // 初始化显示（默认选中label_5，显示初始数值）
-       radioButton->setChecked(true);
+       // 初始化硬件中心频率显示
        updateLabelSize();
 
     // 初始化坐标轴，固定纵轴范围
@@ -32,12 +87,21 @@ NewWindow::NewWindow(QWidget *parent) :
     ui->myCustomPlot->xAxis->setRange(100, 2000); // 横轴范围不变
     // 纵轴固定范围：根据实际信号幅值调整（例如0~50000，确保最大信号不超出）
     ui->myCustomPlot->yAxis->setRange(0, 100);
+    ui->myCustomPlot->setBackground(QBrush(QColor("#010503")));
+    for (QCPAxis *axis : {ui->myCustomPlot->xAxis, ui->myCustomPlot->yAxis}) {
+        axis->setBasePen(QPen(QColor("#4cbf78")));
+        axis->setTickPen(QPen(QColor("#4cbf78")));
+        axis->setSubTickPen(QPen(QColor("#2b7048")));
+        axis->setTickLabelColor(QColor("#aee8bd"));
+        axis->setLabelColor(QColor("#d9f5df"));
+        axis->grid()->setPen(QPen(QColor("#173c28"), 1, Qt::DotLine));
+    }
 
     // 在NewWindow构造函数中修改m_spectrumBars的样式
     m_spectrumBars = new QCPBars(ui->myCustomPlot->xAxis, ui->myCustomPlot->yAxis);
     m_spectrumBars->setWidth(3.0); // 适当加宽柱子
-    m_spectrumBars->setPen(QPen(Qt::darkBlue, 1)); // 深色边框，突出轮廓
-    m_spectrumBars->setBrush(QColor(50, 150, 255, 220)); // 提高不透明度（220/255），蓝色更鲜艳
+    m_spectrumBars->setPen(QPen(QColor("#77ff9f"), 1));
+    m_spectrumBars->setBrush(QColor(55, 224, 112, 210));
     // 可选：添加网格线辅助观察
     ui->myCustomPlot->xAxis->grid()->setVisible(true);
     ui->myCustomPlot->yAxis->grid()->setVisible(true);
@@ -52,6 +116,16 @@ NewWindow::NewWindow(QWidget *parent) :
 
     ui->widget->xAxis->setLabel("记录次数");
     ui->widget->xAxis->setRange(0, m_maxBars + 1);
+    ui->widget->setBackground(QBrush(QColor("#010503")));
+    for (QCPAxis *axis : {ui->widget->xAxis, ui->widget->yAxis}) {
+        axis->setBasePen(QPen(QColor("#4cbf78")));
+        axis->setTickPen(QPen(QColor("#4cbf78")));
+        axis->setTickLabelColor(QColor("#aee8bd"));
+        axis->setLabelColor(QColor("#d9f5df"));
+        axis->grid()->setPen(QPen(QColor("#173c28"), 1, Qt::DotLine));
+    }
+    m_avgBars->setPen(QPen(QColor("#60e9ff")));
+    m_avgBars->setBrush(QColor(39, 180, 203, 190));
 
 
     ui->widget->yAxis->setTicks(true);
@@ -110,8 +184,8 @@ QVector<std::complex<double>> NewWindow::fft(const QVector<std::complex<double>>
 //接收原始pcm数据
 void NewWindow::updateSpectrumBars(const QVector<double>& filteredAudioData)
 {
-    // 进行滤波
-    QVector<double> reFilteredData = butterworthBandpassFilter(filteredAudioData);
+    // 选频由外部硬件完成；软件直接分析硬件输出，不再重复带通滤波。
+    const QVector<double> &reFilteredData = filteredAudioData;
 
     // 计算滤波后的强度并显示在 label_3（添加频率控制）
     if (!reFilteredData.isEmpty()) {
@@ -140,72 +214,61 @@ void NewWindow::updateSpectrumBars(const QVector<double>& filteredAudioData)
             if (m_intensityBuffer.size() > 10)
                 m_intensityBuffer.removeFirst();
 
-            // ===== 关键：如果正在录制，就累计10次 =====
+            // 记录一个完整窗口，用周期门控和分位数抑制静音与突发噪声。
             if (m_recording) {
-                m_recordSum += filteredIntensity;
-                m_recordCount++;
+                m_recordSamples.append(filteredIntensity);
+                ui->pushButton_4->setText(
+                    QString("采集中 %1/16").arg(m_recordSamples.size()));
 
-                if (m_recordCount >= 10) {
-                    double avg = m_recordSum / 10.0;
-
-                    // 结束本次录制
+                if (m_recordSamples.size() >= 16) {
+                    const RobustSignalResult stable = robustSignalLevel(
+                        m_recordSamples.constData(), m_recordSamples.size());
                     m_recording = false;
-                    m_recordCount = 0;
-                    m_recordSum = 0.0;
+                    m_recordSamples.clear();
+                    ui->pushButton_4->setText("记录强度");
 
-                    // 把平均值追加为一根柱子
-                    m_avgHistory.append(avg);
-                    if (m_avgHistory.size() > m_maxBars)
-                        m_avgHistory.removeFirst();
+                    if (!stable.valid) {
+                        ui->label_3->setText("未检测到稳定周期，请重测");
+                    } else {
+                        m_avgHistory.append(stable.level);
+                        if (m_avgHistory.size() > m_maxBars)
+                            m_avgHistory.removeFirst();
 
-                    // 更新柱状图数据
-                    QVector<double> keys, vals;
-                    int n = m_avgHistory.size();
-                    keys.reserve(n);
-                    vals.reserve(n);
-                    for (int i = 0; i < n; ++i) {
-                        keys << (i + 1);
-                        vals << m_avgHistory[i];
+                        QVector<double> keys, vals;
+                        const int n = m_avgHistory.size();
+                        keys.reserve(n);
+                        vals.reserve(n);
+                        for (int i = 0; i < n; ++i) {
+                            keys << (i + 1);
+                            vals << m_avgHistory[i];
+                        }
+                        m_avgBars->setData(keys, vals);
+                        ui->widget->xAxis->setRange(0, 11);
+                        ui->widget->yAxis->setTicks(true);
+                        ui->widget->yAxis->setTickLabels(true);
+                        ui->widget->yAxis->setNumberFormat("f");
+                        ui->widget->yAxis->setNumberPrecision(0);
+
+                        double ymax = 0.0;
+                        for (double value : m_avgHistory)
+                            ymax = qMax(ymax, value);
+                        ui->widget->yAxis->setRange(0, ymax * 1.15 + 8.0);
+                        ui->widget->clearItems();
+
+                        for (int i = 0; i < n; ++i) {
+                            QCPItemText *text = new QCPItemText(ui->widget);
+                            text->setLayer("overlay");
+                            text->position->setType(QCPItemPosition::ptPlotCoords);
+                            text->position->setCoords(i + 1, m_avgHistory[i] + 1.0);
+                            text->setPositionAlignment(Qt::AlignHCenter | Qt::AlignBottom);
+                            text->setText(QString::number(m_avgHistory[i], 'f', 1));
+                            text->setColor(QColor("#d9f5df"));
+                        }
+                        ui->widget->replot();
                     }
-
-                    m_avgBars->setData(keys, vals);
-
-                    // X轴固定显示1~10
-                    ui->widget->xAxis->setRange(0, 11);
-
-                    // 打开Y轴刻度数字
-                    ui->widget->yAxis->setTicks(true);
-                    ui->widget->yAxis->setTickLabels(true);
-                    ui->widget->yAxis->setNumberFormat("f");
-                    ui->widget->yAxis->setNumberPrecision(0);
-
-                    // 计算ymax并留足顶部空间，防止文字被裁
-                    double ymax = 0.0;
-                    for (double v : m_avgHistory) ymax = qMax(ymax, v);
-                    ui->widget->yAxis->setRange(0, ymax * 1.15 + 8.0);
-
-                    // 先清掉旧的文字标签
-                    ui->widget->clearItems();
-
-                    // 给每根柱子加一个数值显示
-                    for (int i = 0; i < n; ++i) {
-                        QCPItemText *text = new QCPItemText(ui->widget);
-                        text->setLayer("overlay");
-                        text->position->setType(QCPItemPosition::ptPlotCoords);
-
-                        // 往上抬一点，避免贴边
-                        text->position->setCoords(i + 1, m_avgHistory[i] + 1.0);
-
-                        text->setPositionAlignment(Qt::AlignHCenter | Qt::AlignBottom);
-                        text->setText(QString::number(m_avgHistory[i], 'f', 1));
-                    }
-
-                    ui->widget->replot();
-
-                    // 可选提示
-                    // ui->statusbar->showMessage(QString("记录完成：Avg(10)=%1%").arg(avg,0,'f',1), 2000);
                 }
             }
+
 
 
 
@@ -219,6 +282,10 @@ void NewWindow::updateSpectrumBars(const QVector<double>& filteredAudioData)
         }
     }
 
+    // 强度测量不依赖FFT；频谱页隐藏时跳过FFT，降低主界面采集负载。
+    if (!isVisible())
+        return;
+
     // 后续FFT计算和频谱显示逻辑（使用滤波后的数据）
     // 1. 准备FFT输入（基于内部滤波后的数据）
     QVector<std::complex<double>> fftInput;
@@ -230,14 +297,13 @@ void NewWindow::updateSpectrumBars(const QVector<double>& filteredAudioData)
     // 2. 执行FFT变换
     QVector<std::complex<double>> fftResult = fft(fftInput);
 
-    // 3. 计算频率轴和幅值（使用label5/7的动态范围）
+    // 3. 频谱只显示硬件中心频率附近，便于观察，不参与滤波。
     QVector<double> frequencies;
     QVector<double> magnitudes;
     double freqStep = SAMPLE_RATE / FFT_SIZE;
 
-    // 从label5和label7获取当前上下限（与滤波参数保持一致）
-    m_filterMinFreq = label5Size;
-    m_filterMaxFreq = label7Size;
+    m_filterMinFreq = m_centerFreq - 200.0;
+    m_filterMaxFreq = m_centerFreq + 200.0;
 
     // 确保范围合法
     m_filterMinFreq = qMax(1.0, m_filterMinFreq);
@@ -273,112 +339,6 @@ void NewWindow::on_pushButton_clicked()
 
 
 
-void NewWindow::setBandpassParams(double sampleRate, double centerFreq, double bandwidth)
-{
-    m_sampleRate = sampleRate;       // 使用传入的采样率
-    m_centerFreq = centerFreq;       // 使用传入的中心频率
-    m_bandwidth = bandwidth;         // 使用传入的带宽
-}
-
-QVector<double> NewWindow::butterworthBandpassFilter(const QVector<double> &data)
-{
-    if (data.isEmpty() || m_sampleRate <= 0)
-        return data;
-
-    // 1. 获取并校验滤波上下限
-    double lowCut = label5Size;
-    double highCut = label7Size;
-    const double nyquist = m_sampleRate / 2.0;
-    lowCut = qMax(1.0, lowCut);
-    highCut = qMin(nyquist - 1.0, highCut);
-    if (lowCut > highCut)
-        qSwap(lowCut, highCut);
-
-    // 2. 计算核心参数
-    m_centerFreq = (lowCut + highCut) / 2.0;
-    m_bandwidth = highCut - lowCut;
-    double w0 = 2 * M_PI * m_centerFreq / m_sampleRate;  // 归一化中心角频率
-    double bw = 2 * M_PI * m_bandwidth / m_sampleRate;   // 归一化带宽
-    double Q = w0 / bw;                                  // 品质因数
-
-    // 3. 8阶滤波器需要4个二阶节（基于巴特沃斯8阶极点分布特性）
-    // 二阶节1（第一对极点）
-    double alpha1 = sin(w0) / (2 * Q * 0.3827);  // 8阶第一级系数（基于√2/2≈0.707的衍生调整）
-    double b0_1 = alpha1;
-    double b1_1 = 0;
-    double b2_1 = -alpha1;
-    double a0_1 = 1 + alpha1;
-    double a1_1 = -2 * cos(w0);
-    double a2_1 = 1 - alpha1;
-    // 归一化
-    b0_1 /= a0_1; b1_1 /= a0_1; b2_1 /= a0_1;
-    a1_1 /= a0_1; a2_1 /= a0_1;
-
-    // 二阶节2（第二对极点）
-    double alpha2 = sin(w0) / (2 * Q * 0.9239);  // 8阶第二级系数
-    double b0_2 = alpha2;
-    double b1_2 = 0;
-    double b2_2 = -alpha2;
-    double a0_2 = 1 + alpha2;
-    double a1_2 = -2 * cos(w0);
-    double a2_2 = 1 - alpha2;
-    // 归一化
-    b0_2 /= a0_2; b1_2 /= a0_2; b2_2 /= a0_2;
-    a1_2 /= a0_2; a2_2 /= a0_2;
-
-    // 二阶节3（第三对极点，与第二对对称）
-    double alpha3 = sin(w0) / (2 * Q * 0.9239);
-    double b0_3 = alpha3;
-    double b1_3 = 0;
-    double b2_3 = -alpha3;
-    double a0_3 = 1 + alpha3;
-    double a1_3 = -2 * cos(w0);
-    double a2_3 = 1 - alpha3;
-    // 归一化
-    b0_3 /= a0_3; b1_3 /= a0_3; b2_3 /= a0_3;
-    a1_3 /= a0_3; a2_3 /= a0_3;
-
-    // 二阶节4（第四对极点，与第一对对称）
-    double alpha4 = sin(w0) / (2 * Q * 0.3827);
-    double b0_4 = alpha4;
-    double b1_4 = 0;
-    double b2_4 = -alpha4;
-    double a0_4 = 1 + alpha4;
-    double a1_4 = -2 * cos(w0);
-    double a2_4 = 1 - alpha4;
-    // 归一化
-    b0_4 /= a0_4; b1_4 /= a0_4; b2_4 /= a0_4;
-    a1_4 /= a0_4; a2_4 /= a0_4;
-
-    // 4. 级联滤波（4个二阶节依次处理）
-    QVector<double> temp1 = applySecondOrderSection(data, b0_1, b1_1, b2_1, a1_1, a2_1);
-    QVector<double> temp2 = applySecondOrderSection(temp1, b0_2, b1_2, b2_2, a1_2, a2_2);
-    QVector<double> temp3 = applySecondOrderSection(temp2, b0_3, b1_3, b2_3, a1_3, a2_3);
-    QVector<double> filteredData = applySecondOrderSection(temp3, b0_4, b1_4, b2_4, a1_4, a2_4);
-
-    return filteredData;
-}
-
-// 辅助函数保持不变（单个二阶节处理）
-QVector<double> NewWindow::applySecondOrderSection(const QVector<double>& input,
-                                                  double b0, double b1, double b2,
-                                                  double a1, double a2)
-{
-    QVector<double> output(input.size());
-    if (input.isEmpty()) return output;
-
-    // 边界处理
-    if (input.size() >= 1) output[0] = b0 * input[0];
-    if (input.size() >= 2) output[1] = b0 * input[1] + b1 * input[0] - a1 * output[0];
-
-    // 递归滤波
-    for (int i = 2; i < input.size(); ++i) {
-        output[i] = b0 * input[i] + b1 * input[i-1] + b2 * input[i-2]
-                  - a1 * output[i-1] - a2 * output[i-2];
-    }
-
-    return output;
-}
 
 
 void NewWindow::updateWaveform(const QVector<double> &waveData)
@@ -391,57 +351,41 @@ void NewWindow::updateWaveform(const QVector<double> &waveData)
 
 void NewWindow::onAddClicked()
 {
-    if (radioButton->isChecked()) {
-        label5Size += 100;
-        label5Size = qMin(label5Size, label7Size);  // 下限不能超过上限
-    } else if (radioButton_2->isChecked()) {
-        label7Size += 100;
-        label7Size = qMin(label7Size, (int)(m_sampleRate / 2 - 1));  // 不超过奈奎斯特频率
-    }
+    m_centerFreq = qMin(20000.0, m_centerFreq + 100.0);
     updateLabelSize();
 }
 
 void NewWindow::onSubtractClicked()
 {
-    if (radioButton->isChecked()) {
-        label5Size = qMax(1, label5Size - 100);  // 下限不低于1
-    } else if (radioButton_2->isChecked()) {
-        label7Size -= 100;
-        label7Size = qMax(label7Size, label5Size);  // 上限不能低于下限
-    }
+    m_centerFreq = qMax(100.0, m_centerFreq - 100.0);
     updateLabelSize();
 }
 void NewWindow::updateLabelSize()
 {
-    if (radioButton->isChecked()) {
-        // 只显示label_5的当前数值，不修改字体大小
-        label_5->setText(QString("%1").arg(label5Size));
-    } else if (radioButton_2->isChecked()) {
-        // 只显示label_7的当前数值，不修改字体大小
-        label_7->setText(QString("%1").arg(label7Size));
-    }
+    label_5->setText(QString("%1 Hz").arg(m_centerFreq, 0, 'f', 0));
+    ui->label->setText(QString("中心频率：%1 Hz").arg(m_centerFreq, 0, 'f', 0));
+    emit centerFrequencyChanged(m_centerFreq);
 }
-
-void NewWindow::setLeftChannelLevel(qreal level)
-{
-
-
-    // 将强度归一化到0-100范围（与之前逻辑一致）
-    int displayLevel = qBound(0, static_cast<int>(qRound(level)), 100);
-
-
-}
-
 
 void NewWindow::on_pushButton_4_clicked()
 {
-      m_recording = true;
-      m_recordCount = 0;
-      m_recordSum = 0.0;
+    m_recording = true;
+    m_recordSamples.clear();
+    ui->pushButton_4->setText("采集中 0/16");
+}
+
+void NewWindow::setCenterFrequency(double frequency)
+{
+    m_centerFreq = qBound(100.0, frequency, 20000.0);
+    label_5->setText(QString("%1 Hz").arg(m_centerFreq, 0, 'f', 0));
+    ui->label->setText(QString("中心频率：%1 Hz").arg(m_centerFreq, 0, 'f', 0));
 }
 
 void NewWindow::on_pushButton_5_clicked()
 {
+      m_recording = false;
+      m_recordSamples.clear();
+      ui->pushButton_4->setText("记录强度");
     // 1️⃣ 清空柱子数据
       m_avgHistory.clear();
       m_avgBars->setData(QVector<double>(), QVector<double>());

@@ -24,7 +24,8 @@ HEADERS += \
     barchartmainwindow.h \
     gps.h \
     newwindow.h \
-    qcustomplot.h
+    qcustomplot.h \
+    signalquality.h
 
 RESOURCES += \
     res.qrc
